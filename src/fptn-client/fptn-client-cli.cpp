@@ -40,6 +40,10 @@ Distributed under the MIT License (https://opensource.org/licenses/MIT)
 #include "utils/signal/main_loop.h"
 #include "vpn/vpn_manager.h"
 
+#include "fptn-client/socks/policy_route.h"
+#include "fptn-client/socks/socks5_server.h"
+#include "fptn-protocol-lib/https/socket_options.h"
+
 int main(int argc, char* argv[]) {
 #if defined(__linux__) || defined(__APPLE__)
   if (geteuid() != 0) {
@@ -287,6 +291,29 @@ int main(int argc, char* argv[]) {
             "Format: com,another.com,sub.domainname.com\n"
             "Empty (default) uses the built-in list");
     // parse cmd arguments
+    /* --- integration with transparent proxies (ZeroBlock and friends) --- */
+    args.add_argument("--disable-routing")
+        .flag()
+        .help(
+            "Do not touch system routing tables. The TUN interface is brought "
+            "up, but the default route stays untouched. Use together with "
+            "--socks-listen when another daemon owns the routing");
+    args.add_argument("--routing-mark")
+        .default_value(std::string(""))
+        .help(
+            "Set SO_MARK (hex or decimal) on all outgoing sockets so that "
+            "firewall rules can exclude client traffic from DPI-bypass or "
+            "transparent proxying (e.g. 0x40000000)");
+    args.add_argument("--socks-listen")
+        .default_value(std::string(""))
+        .help(
+            "Run a SOCKS5 server that forwards connections through the tunnel, "
+            "e.g. 127.0.0.1:1080. Implies --disable-routing");
+    args.add_argument("--socks-route-table")
+        .default_value(1080)
+        .scan<'i', int>()
+        .help("Routing table id used for SOCKS traffic (default: 1080)");
+
     try {
       args.parse_args(argc, argv);
     } catch (const std::runtime_error& err) {
@@ -294,6 +321,7 @@ int main(int argc, char* argv[]) {
       std::cerr << args;
       return EXIT_FAILURE;
     }
+
 
     if (fptn::logger::init("fptn-client-cli")) {
       SPDLOG_INFO("Application started successfully.");
@@ -335,6 +363,50 @@ int main(int argc, char* argv[]) {
             args.get<std::string>("--tun-interface-ipv6"));
     const auto sni = args.get<std::string>("--sni");
 
+    const auto socks_listen = args.get<std::string>("--socks-listen");
+    const bool socks_enabled = !socks_listen.empty();
+    const bool disable_routing =
+        args.get<bool>("--disable-routing") || socks_enabled;
+    const auto socks_route_table = args.get<int>("--socks-route-table");
+
+    std::uint32_t routing_mark = 0;
+    {
+      const auto raw_mark = args.get<std::string>("--routing-mark");
+      if (!raw_mark.empty()) {
+        try {
+          // base 0 => understands both the 0x prefix and decimal notation
+          routing_mark =
+              static_cast<std::uint32_t>(std::stoul(raw_mark, nullptr, 0));
+        } catch (const std::exception&) {
+          SPDLOG_ERROR("Invalid --routing-mark value: {}", raw_mark);
+          return EXIT_FAILURE;
+        }
+      }
+    }
+    if (routing_mark != 0) {
+      fptn::protocol::https::SetRoutingMark(routing_mark);
+    }
+
+    std::string socks_address = "127.0.0.1";
+    std::uint16_t socks_port = 1080;
+    if (socks_enabled) {
+      const auto colon = socks_listen.rfind(':');
+      if (colon == std::string::npos) {
+        SPDLOG_ERROR(
+            "Invalid --socks-listen value '{}', expected <address>:<port>",
+            socks_listen);
+        return EXIT_FAILURE;
+      }
+      socks_address = socks_listen.substr(0, colon);
+      try {
+        socks_port = static_cast<std::uint16_t>(
+            std::stoi(socks_listen.substr(colon + 1)));
+      } catch (const std::exception&) {
+        SPDLOG_ERROR("Invalid port in --socks-listen '{}'", socks_listen);
+        return EXIT_FAILURE;
+      }
+    }
+
     /* check gateway address */
     const auto using_gateway_ip =
         gateway_ip.IsEmpty()
@@ -344,7 +416,7 @@ int main(int argc, char* argv[]) {
         gateway_ipv6.IsEmpty()
             ? fptn::routing::GetDefaultGatewayIPv6Address(tun_interface_name)
             : fptn::common::network::IPv6Address::Create(gateway_ipv6);
-    if (using_gateway_ip.IsEmpty()) {
+    if (using_gateway_ip.IsEmpty() && !disable_routing) {
       SPDLOG_ERROR(
           "Unable to find the default gateway IP address. "
           "Please check your connection and make sure no other VPN is active. "
@@ -555,7 +627,12 @@ int main(int argc, char* argv[]) {
                 .ipv6_netmask = 126});
 
     // route manager
-    auto route_manager = std::make_shared<fptn::routing::RouteManager>(
+    // In --disable-routing mode another daemon owns the routes
+    // (ZeroBlock, mwan3, ...). VpnManager honours that: with an empty
+    // route_manager it brings the TUN up but never touches routing tables.
+    fptn::routing::RouteManagerSPtr route_manager;
+    if (!disable_routing) {
+      route_manager = std::make_shared<fptn::routing::RouteManager>(
         fptn::routing::RouteManager::Config{
             .out_interface_name = out_network_interface_name,
             .tun_interface_address_ipv4 = tun_interface_address_ipv4,
@@ -571,17 +648,19 @@ int main(int argc, char* argv[]) {
             ,
             .enable_advanced_dns_management = false
 #endif
-        });
+          });
+    }
 
     /* plugins */
     std::vector<fptn::plugin::BasePluginPtr> client_plugins;
-    if (!blacklist_domains.empty()) {
+    // Plugins drive routes via route_manager - useless without it.
+    if (route_manager && !blacklist_domains.empty()) {
       auto blacklist_plugin = std::make_unique<fptn::plugin::DomainBlacklist>(
           blacklist_domains, route_manager);
       client_plugins.push_back(std::move(blacklist_plugin));
     }
 
-    if (enable_split_tunnel) {
+    if (route_manager && enable_split_tunnel) {
       const auto policy = tunnel_mode == "exclude"
                               ? fptn::routing::RoutingPolicy::kExcludeFromVpn
                               : fptn::routing::RoutingPolicy::kIncludeInVpn;
@@ -610,11 +689,52 @@ int main(int argc, char* argv[]) {
 
     vpn_client.Start();
 
+    /* SOCKS5 entry point for transparent proxies */
+    std::unique_ptr<fptn::socks::PolicyRoute> policy_route;
+    fptn::socks::Socks5ServerPtr socks_server;
+    if (socks_enabled) {
+      // Dedicated routing table: the main one is left alone, the rule only
+      // matches sockets bound to the tunnel address.
+      policy_route = std::make_unique<fptn::socks::PolicyRoute>(
+          fptn::socks::PolicyRoute::Config{
+              .tun_interface_name = tun_interface_name,
+              .tun_address_ipv4 = tun_interface_address_ipv4.ToString(),
+              .tun_address_ipv6 = tun_interface_address_ipv6.ToString(),
+              .table_id = static_cast<std::uint32_t>(socks_route_table)});
+      if (!policy_route->Apply()) {
+        SPDLOG_ERROR("Failed to set up policy routing for SOCKS5");
+        vpn_client.Stop();
+        return EXIT_FAILURE;
+      }
+      socks_server = std::make_unique<fptn::socks::Socks5Server>(
+          fptn::socks::Socks5Server::Config{
+              .listen_address = socks_address,
+              .listen_port = socks_port,
+              .tun_interface_name = tun_interface_name,
+              .tun_address_ipv4 = tun_interface_address_ipv4.ToString(),
+              .tun_address_ipv6 = tun_interface_address_ipv6.ToString(),
+              .dns_server_ipv4 = dns_server_ipv4.ToString()});
+      if (!socks_server->Start()) {
+        SPDLOG_ERROR("Failed to start SOCKS5 server");
+        policy_route->Clean();
+        vpn_client.Stop();
+        return EXIT_FAILURE;
+      }
+    }
+
     /* start event loop */
     fptn::utils::WaitForSignal(vpn_client);
 
     /* clean */
-    route_manager->Clean();
+    if (socks_server) {
+      socks_server->Stop();
+    }
+    if (policy_route) {
+      policy_route->Clean();
+    }
+    if (route_manager) {
+      route_manager->Clean();
+    }
     vpn_client.Stop();
     spdlog::shutdown();
     return EXIT_SUCCESS;

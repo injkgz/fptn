@@ -68,6 +68,9 @@ add_executable(
   vpn/http/client.cpp
   routing/route_manager.h
   routing/route_manager.cpp
+  socks/socks5_server.cpp
+  socks/policy_route.cpp
+  socks/tunnel_resolver.cpp
   config/config_file.cpp
   config/config_file.h
   plugins/split/tunneling.h

@@ -20,6 +20,7 @@ Distributed under the MIT License (https://opensource.org/licenses/MIT)
 
 #include "fptn-protocol-lib/https/api_client/api_client.h"
 #include "fptn-protocol-lib/https/obfuscator/methods/tls2/tls_obfuscator2.h"
+#include "fptn-protocol-lib/https/socket_options.h"
 #include "fptn-protocol-lib/protocol/yaff/yaff_serializer.h"
 
 #ifdef __APPLE__
@@ -342,9 +343,22 @@ boost::asio::awaitable<bool> WebsocketClient::Connect() {
       co_return false;
     }
 
-    // TCP connect
-    co_await boost::beast::get_lowest_layer(ws_).async_connect(
-        results, boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+    // TCP connect. Unchanged unless a routing mark is configured: SO_MARK has
+    // to be applied before the SYN leaves, and a range connect reopens the
+    // socket per attempt, which would drop it.
+    if (fptn::protocol::https::GetRoutingMark() != 0) {
+      auto& socket = boost::beast::get_lowest_layer(ws_).socket();
+      const auto endpoint = results.begin()->endpoint();
+      socket.open(endpoint.protocol(), ec);
+      if (!ec) {
+        fptn::protocol::https::ApplyRoutingMark(socket.native_handle());
+      }
+      co_await boost::beast::get_lowest_layer(ws_).async_connect(
+          endpoint, boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+    } else {
+      co_await boost::beast::get_lowest_layer(ws_).async_connect(
+          results, boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+    }
     if (ec) {
       SPDLOG_ERROR("Connect error: {}", ec.message());
       co_return false;

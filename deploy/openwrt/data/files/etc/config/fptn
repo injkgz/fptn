@@ -12,6 +12,13 @@ config fptn 'config'
 	option use_fptn_dns '1'
 	option enable_split_tunnel '1'
 	option split_tunnel_mode 'exclude'
+	# Coexistence with a transparent proxy (ZeroBlock, mwan3, ...):
+	# leave routing alone, expose SOCKS5 instead and mark our own sockets
+	# so firewall rules can exclude them from processing.
+	option disable_routing '0'
+	option socks_listen ''
+	option socks_route_table '1080'
+	option routing_mark ''
 	list exclude_tunnel_networks '10.0.0.0/8'
 	list exclude_tunnel_networks '172.16.0.0/12'
 	list exclude_tunnel_networks '192.168.0.0/16'

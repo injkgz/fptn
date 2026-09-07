@@ -5,6 +5,7 @@ Distributed under the MIT License (https://opensource.org/licenses/MIT)
 =============================================================================*/
 
 #include "fptn-protocol-lib/https/api_client/api_client.h"
+#include "fptn-protocol-lib/https/socket_options.h"
 
 #include <atomic>
 #include <chrono>
@@ -69,6 +70,7 @@ bool IsPortOpen(const std::string& host, const int port) {
     boost::asio::io_context ioc;
     boost::asio::ip::tcp::socket socket(ioc);
     socket.open(boost::asio::ip::tcp::v4());
+    fptn::protocol::https::ApplyRoutingMark(socket.native_handle());
 
     boost::asio::ip::tcp::endpoint endpoint;
     boost::system::error_code addr_ec;
