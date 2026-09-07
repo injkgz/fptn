@@ -64,6 +64,25 @@ Distributed under the MIT License (https://opensource.org/licenses/MIT)
 
 namespace {
 
+// ConnectStream keeps the stock connect for the default path and, when a
+// routing mark is configured, opens and marks the socket first so the kernel's
+// route lookup sees the mark.
+template <typename Stream>
+boost::asio::ip::tcp::endpoint ConnectStream(
+    Stream& stream, const boost::asio::ip::tcp::resolver::results_type& results) {
+  if (fptn::protocol::https::GetRoutingMark() == 0) {
+    return boost::beast::get_lowest_layer(stream).connect(results);
+  }
+  boost::system::error_code ec;
+  auto& socket = boost::beast::get_lowest_layer(stream).socket();
+  const auto endpoint =
+      fptn::protocol::https::ConnectMarked(socket, results, ec);
+  if (ec) {
+    throw boost::system::system_error(ec);
+  }
+  return endpoint;
+}
+
 bool IsPortOpen(const std::string& host, const int port) {
   constexpr std::chrono::milliseconds kConnectTimeout{1500};
   try {
@@ -422,8 +441,21 @@ boost::asio::awaitable<Response> ApiClient::AsyncPost(const std::string& handle,
       }
     }
 
-    co_await boost::beast::get_lowest_layer(stream).async_connect(
-        results, boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+    if (fptn::protocol::https::GetRoutingMark() != 0) {
+      // The mark has to be on the socket before the SYN, and async_connect
+      // opens it itself, so the marked path connects to the first endpoint.
+      auto& socket = boost::beast::get_lowest_layer(stream).socket();
+      const auto endpoint = results.begin()->endpoint();
+      socket.open(endpoint.protocol(), ec);
+      if (!ec) {
+        fptn::protocol::https::ApplyRoutingMark(socket.native_handle());
+        co_await socket.async_connect(
+            endpoint, boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+      }
+    } else {
+      co_await boost::beast::get_lowest_layer(stream).async_connect(
+          results, boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+    }
     if (ec) {
       SPDLOG_ERROR("AsyncPost [{}] - Connect failed for {}: {}", handle, host_,
           ec.message());
@@ -615,8 +647,8 @@ Response ApiClient::GetImpl(const std::string& handle, int timeout) const {
       stream.next_layer().next_layer().expires_after(
           std::chrono::seconds(timeout));
 
-      auto connected_endpoint = boost::beast::get_lowest_layer(stream).connect(
-          resolve_result.results);
+      auto connected_endpoint =
+          ConnectStream(stream, resolve_result.results);
       server_ip = connected_endpoint.address().to_string();
 
       SPDLOG_INFO("GET [{}] - Successfully connected to {}", handle, host_);
@@ -780,8 +812,8 @@ Response ApiClient::PostImpl(const std::string& handle,
       stream.next_layer().next_layer().expires_after(
           std::chrono::seconds(timeout));
 
-      auto connected_endpoint = boost::beast::get_lowest_layer(stream).connect(
-          resolve_result.results);
+      auto connected_endpoint =
+          ConnectStream(stream, resolve_result.results);
       server_ip = connected_endpoint.address().to_string();
 
       SPDLOG_INFO("POST [{}] - Successfully connected to {}", handle, host_);
@@ -954,8 +986,7 @@ bool ApiClient::TestHandshakeImpl(int timeout) const {
     stream.next_layer().next_layer().expires_after(
         std::chrono::seconds(timeout));
 
-    auto connected_endpoint =
-        boost::beast::get_lowest_layer(stream).connect(resolve_result.results);
+    auto connected_endpoint = ConnectStream(stream, resolve_result.results);
     server_ip = connected_endpoint.address().to_string();
 
     SPDLOG_INFO("TestHandshake - Successfully connected to {} (IP: {})", host_,

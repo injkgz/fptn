@@ -20,6 +20,9 @@ Distributed under the MIT License (https://opensource.org/licenses/MIT)
 
 namespace fptn::socks {
 
+// SOCKS5 entry point for coexistence with a transparent proxy in front of the
+// client. CONNECT only: QUIC and other UDP do not traverse it, so they either
+// stay outside the tunnel or the application has to fall back to TCP.
 class Socks5Server {
  public:
   struct Config {

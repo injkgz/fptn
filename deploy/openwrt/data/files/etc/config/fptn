@@ -16,6 +16,7 @@ config fptn 'config'
 	# leave routing alone, expose SOCKS5 instead and mark our own sockets
 	# so firewall rules can exclude them from processing.
 	option disable_routing '0'
+	# SOCKS5 (CONNECT only - TCP; QUIC and other UDP do not traverse it).
 	option socks_listen ''
 	option socks_route_table '1080'
 	option routing_mark ''

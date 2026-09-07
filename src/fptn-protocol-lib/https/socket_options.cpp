@@ -8,6 +8,8 @@ Distributed under the MIT License (https://opensource.org/licenses/MIT)
 
 #include <atomic>
 
+#include <boost/asio/error.hpp>
+
 #if defined(__linux__)
 #include <sys/socket.h>  // NOLINT(build/include_order)
 
@@ -54,6 +56,27 @@ bool ApplyRoutingMark(int fd) noexcept {
   (void)fd;
   return true;
 #endif
+}
+
+boost::asio::ip::tcp::endpoint ConnectMarked(boost::asio::ip::tcp::socket& socket,
+    const boost::asio::ip::tcp::resolver::results_type& results,
+    boost::system::error_code& ec) {
+  if (results.empty()) {
+    ec = boost::asio::error::not_found;
+    return {};
+  }
+  const auto endpoint = results.begin()->endpoint();
+  socket.close(ec);
+  socket.open(endpoint.protocol(), ec);
+  if (ec) {
+    return {};
+  }
+  ApplyRoutingMark(socket.native_handle());
+  socket.connect(endpoint, ec);
+  if (ec) {
+    return {};
+  }
+  return endpoint;
 }
 
 }  // namespace fptn::protocol::https
