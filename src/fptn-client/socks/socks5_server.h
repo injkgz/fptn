@@ -21,8 +21,8 @@ Distributed under the MIT License (https://opensource.org/licenses/MIT)
 namespace fptn::socks {
 
 // SOCKS5 entry point for coexistence with a transparent proxy in front of the
-// client. CONNECT only: QUIC and other UDP do not traverse it, so they either
-// stay outside the tunnel or the application has to fall back to TCP.
+// client. CONNECT and UDP ASSOCIATE, so QUIC and plain UDP traverse it too;
+// see udp_associate.h for how datagrams are relayed.
 class Socks5Server {
  public:
   struct Config {
@@ -51,6 +51,10 @@ class Socks5Server {
       boost::asio::ip::tcp::socket client);
   boost::asio::awaitable<void> Relay(boost::asio::ip::tcp::socket& from,
       boost::asio::ip::tcp::socket& to);
+  boost::asio::awaitable<void> HandleUdpAssociate(
+      boost::asio::ip::tcp::socket& client, std::uint64_t session_id);
+  boost::asio::awaitable<void> WaitForClose(
+      boost::asio::ip::tcp::socket& client);
 
   Config config_;
   boost::asio::io_context ioc_;

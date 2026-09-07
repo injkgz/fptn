@@ -6,6 +6,8 @@ Distributed under the MIT License (https://opensource.org/licenses/MIT)
 
 #include "fptn-client/socks/socks5_server.h"
 
+#include "fptn-client/socks/udp_associate.h"
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -36,6 +38,7 @@ constexpr std::uint8_t kAuthNone = 0x00;
 constexpr std::uint8_t kAuthUnacceptable = 0xFF;
 
 constexpr std::uint8_t kCmdConnect = 0x01;
+constexpr std::uint8_t kCmdUdpAssociate = 0x03;
 
 constexpr std::uint8_t kAtypIPv4 = 0x01;
 constexpr std::uint8_t kAtypDomain = 0x03;
@@ -75,6 +78,30 @@ boost::asio::awaitable<void> SendReply(
     boost::asio::ip::tcp::socket& client, std::uint8_t reply) {
   const std::array<std::uint8_t, 10> response{
       kVersion, reply, 0x00, kAtypIPv4, 0, 0, 0, 0, 0, 0};
+  boost::system::error_code ec;
+  co_await boost::asio::async_write(client, boost::asio::buffer(response),
+      boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+}
+
+// Reply carrying a real BND.ADDR/BND.PORT, which UDP ASSOCIATE needs: it tells
+// the client where to send its datagrams.
+boost::asio::awaitable<void> SendReplyWithEndpoint(
+    boost::asio::ip::tcp::socket& client,
+    std::uint8_t reply,
+    const boost::asio::ip::udp::endpoint& endpoint) {
+  std::vector<std::uint8_t> response{kVersion, reply, 0x00};
+  if (endpoint.address().is_v4()) {
+    const auto bytes = endpoint.address().to_v4().to_bytes();
+    response.push_back(kAtypIPv4);
+    response.insert(response.end(), bytes.begin(), bytes.end());
+  } else {
+    const auto bytes = endpoint.address().to_v6().to_bytes();
+    response.push_back(kAtypIPv6);
+    response.insert(response.end(), bytes.begin(), bytes.end());
+  }
+  response.push_back(static_cast<std::uint8_t>(endpoint.port() >> 8));
+  response.push_back(static_cast<std::uint8_t>(endpoint.port() & 0xFF));
+
   boost::system::error_code ec;
   co_await boost::asio::async_write(client, boost::asio::buffer(response),
       boost::asio::redirect_error(boost::asio::use_awaitable, ec));
@@ -222,9 +249,9 @@ boost::asio::awaitable<void> Socks5Server::HandleSession(
   if (ec || header[0] != kVersion) {
     co_return;
   }
-  if (header[1] != kCmdConnect) {
-    SPDLOG_WARN("SOCKS5[{}]: unsupported command {} (only CONNECT)", session_id,
-        header[1]);
+  const std::uint8_t command = header[1];
+  if (command != kCmdConnect && command != kCmdUdpAssociate) {
+    SPDLOG_WARN("SOCKS5[{}]: unsupported command {}", session_id, command);
     co_await SendReply(client, kRepCommandNotSupported);
     co_return;
   }
@@ -286,6 +313,11 @@ boost::asio::awaitable<void> Socks5Server::HandleSession(
   }
   const auto target_port =
       static_cast<std::uint16_t>((port_bytes[0] << 8) | port_bytes[1]);
+
+  if (command == kCmdUdpAssociate) {
+    co_await HandleUdpAssociate(client, session_id);
+    co_return;
+  }
 
   // Resolve the name through the tunnel, otherwise the local dnsmasq hands us a FakeIP.
   if (!have_address) {
@@ -391,6 +423,55 @@ boost::asio::awaitable<void> Socks5Server::Relay(
   // Half-close the peer socket, otherwise the opposite coroutine hangs forever.
   boost::system::error_code shutdown_ec;
   to.shutdown(boost::asio::ip::tcp::socket::shutdown_send, shutdown_ec);
+}
+
+// The association is owned by this coroutine, so it dies with the control
+// connection exactly as RFC 1928 requires. Both directions are awaited
+// together: whichever ends first tears the other down.
+boost::asio::awaitable<void> Socks5Server::HandleUdpAssociate(
+    boost::asio::ip::tcp::socket& client, std::uint64_t session_id) {
+  using boost::asio::experimental::awaitable_operators::operator||;
+
+  auto executor = co_await boost::asio::this_coro::executor;
+  UdpAssociate associate(executor,
+      UdpAssociate::Config{
+          .listen_address = config_.listen_address,
+          .tun_address_ipv4 = config_.tun_address_ipv4,
+          .tun_address_ipv6 = config_.tun_address_ipv6,
+      },
+      resolver_.get(), session_id);
+
+  boost::system::error_code ec;
+  if (!associate.Open(ec)) {
+    SPDLOG_WARN("SOCKS5[{}]: UDP associate failed: {}", session_id,
+        ec.message());
+    co_await SendReply(client, kRepGeneralFailure);
+    co_return;
+  }
+
+  co_await SendReplyWithEndpoint(
+      client, kRepSuccess, associate.BoundEndpoint());
+  SPDLOG_DEBUG("SOCKS5[{}]: UDP associate on {}:{}", session_id,
+      associate.BoundEndpoint().address().to_string(),
+      associate.BoundEndpoint().port());
+
+  // Reading the control connection is how its close is noticed; a compliant
+  // client sends nothing on it, so any byte just keeps the wait alive.
+  co_await (associate.Run() || WaitForClose(client));
+  associate.Close();
+}
+
+boost::asio::awaitable<void> Socks5Server::WaitForClose(
+    boost::asio::ip::tcp::socket& client) {
+  std::array<std::uint8_t, 64> scratch{};
+  boost::system::error_code ec;
+  for (;;) {
+    co_await client.async_read_some(boost::asio::buffer(scratch),
+        boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+    if (ec) {
+      co_return;
+    }
+  }
 }
 
 }  // namespace fptn::socks
