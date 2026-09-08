@@ -37,8 +37,7 @@ append_bool() {
 ACCESS_TOKENS=""
 
 collect_token() {
-	[ -n "$1" ] && ACCESS_TOKENS="${ACCESS_TOKENS}$1
-"
+	[ -n "$1" ] && ACCESS_TOKENS="${ACCESS_TOKENS:+$ACCESS_TOKENS }$1"
 }
 
 # Ключей может быть несколько: 'list access_token' на каждый. Одиночный
@@ -175,13 +174,9 @@ start_service() {
 	procd_open_instance
 	procd_set_param command "$PROG"
 	local token
-	local IFS_SAVED="$IFS"
-	IFS='
-'
 	for token in $ACCESS_TOKENS; do
-		[ -n "$token" ] && procd_append_param command --access-token "$token"
+		procd_append_param command --access-token "$token"
 	done
-	IFS="$IFS_SAVED"
 	[ -n "$gateway" ] && procd_append_param command --gateway-ip "$gateway"
 
 	local iface
