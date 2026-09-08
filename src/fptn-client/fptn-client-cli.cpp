@@ -157,9 +157,13 @@ std::optional<fptn::utils::speed_estimator::LoginResult> SelectServer(
       return result;
     }
 
-    SPDLOG_WARN("{} answered in {} ms, over the {} ms limit - trying another",
-        DescribeServer(result->server),
-        ms == UINT64_MAX ? -1 : static_cast<std::int64_t>(ms), max_ping_ms);
+    if (ms == UINT64_MAX) {
+      SPDLOG_WARN("{} did not answer the latency check - trying another",
+          DescribeServer(result->server));
+    } else {
+      SPDLOG_WARN("{} answered in {} ms, over the {} ms limit - trying another",
+          DescribeServer(result->server), ms, max_ping_ms);
+    }
     last = result;
     std::erase_if(servers, [&](const ServerInfo& server) {
       return server.host == result->server.host &&
