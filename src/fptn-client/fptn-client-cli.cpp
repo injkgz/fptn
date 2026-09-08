@@ -51,7 +51,6 @@ Distributed under the MIT License (https://opensource.org/licenses/MIT)
 #include "utils/signal/main_loop.h"
 #include "vpn/vpn_manager.h"
 
-#include "fptn-client/socks/policy_route.h"
 #include "fptn-client/socks/socks5_server.h"
 #include "fptn-protocol-lib/https/socket_options.h"
 
@@ -59,10 +58,8 @@ namespace {
 
 using fptn::utils::speed_estimator::ServerInfo;
 
-// Every server of every token, each carrying the credentials of the token
-// it came from. One key or a dozen, what leaves here is a single pool: the
-// login race and --preferred-server then work the same way whether the
-// servers belong to one service or several.
+// Servers of every token in one pool, each carrying the credentials of the
+// token it came from.
 std::vector<ServerInfo> CollectServers(const std::vector<std::string>& tokens,
     const std::string& sni,
     fptn::protocol::https::CensorshipStrategy censorship_strategy) {
@@ -82,9 +79,8 @@ std::vector<ServerInfo> CollectServers(const std::vector<std::string>& tokens,
   return servers;
 }
 
-// Names repeat across services - two providers both call a server
-// "Server-1" - so a name may be qualified with the service it belongs to:
-// "MyService/Server-1". A bare name matches in any service, first wins.
+// A name may be qualified with its service ("MyService/Server-1") when the
+// same name occurs in more than one token.
 std::optional<ServerInfo> FindPreferredServer(
     const std::vector<ServerInfo>& servers, const std::string& wanted) {
   const auto normalize = [](const std::string& value) {
@@ -105,8 +101,7 @@ std::optional<ServerInfo> FindPreferredServer(
   return *it;
 }
 
-// What to call a server in the log: qualified once more than one service
-// is in play.
+// Name for the log, qualified when the service is known.
 std::string DescribeServer(const ServerInfo& server) {
   if (server.service_name.empty()) {
     return server.name;
@@ -114,8 +109,8 @@ std::string DescribeServer(const ServerInfo& server) {
   return fmt::format("{}/{}", server.service_name, server.name);
 }
 
-// Drops the servers whose name matches the pattern. Both the bare name and
-// "service/name" are tested, so a whole service can be excluded at once.
+// Both the bare name and "service/name" are matched, so a whole service can
+// be excluded at once.
 std::vector<ServerInfo> ExcludeServers(
     const std::vector<ServerInfo>& servers, const std::string& pattern) {
   if (pattern.empty()) {
@@ -135,9 +130,9 @@ std::vector<ServerInfo> ExcludeServers(
   return kept;
 }
 
-// The login race returns whichever server answers first. With a latency limit
-// set that is not enough: the winner is measured, and a server over the limit
-// is dropped and the race repeated. Three rounds, then the best of a bad lot.
+// The login race returns whichever server answers first, which says nothing
+// about its speed: with a limit set the winner is measured, dropped if it is
+// over, and the race repeated. Three rounds, then the best of a bad lot.
 std::optional<fptn::utils::speed_estimator::LoginResult> SelectServer(
     std::vector<ServerInfo> servers,
     const std::string& sni,
@@ -175,9 +170,8 @@ std::optional<fptn::utils::speed_estimator::LoginResult> SelectServer(
   return last;
 }
 
-// Keeps an eye on the server in use: gone, or slower than the limit three
-// checks in a row, and the process asks to be restarted. procd (or systemd)
-// brings it back up, and the selection above then picks a different server.
+// Three checks over the limit and the process asks to be restarted: procd
+// brings it back and the selection above picks a different server.
 class LatencyWatchdog final {
  public:
   LatencyWatchdog(ServerInfo server,
@@ -774,8 +768,6 @@ int main(int argc, char* argv[]) {
         }
       }
       if (use_login_race) {
-        // One race over the servers of every token: whichever key answers
-        // first is the one this run connects with.
         auto login_result =
             SelectServer(servers, sni, censorship_strategy, max_ping);
         if (!login_result) {

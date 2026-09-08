@@ -16,33 +16,19 @@ Distributed under the MIT License (https://opensource.org/licenses/MIT)
 #include <boost/asio/ip/udp.hpp>
 #include <boost/asio/steady_timer.hpp>
 
-#include "fptn-client/socks/tunnel_resolver.h"
+#include "fptn-client/socks/socks5_server.h"
 
 namespace fptn::socks {
 
-// UDP ASSOCIATE (RFC 1928 section 4, datagram format in section 7), the half of
-// SOCKS5 that carries QUIC and plain UDP.
-//
-// Same approach as the TCP side: no user-space UDP stack. Datagrams arriving on
-// the relay socket are unwrapped and sent from a kernel socket bound to the TUN
-// address, so the policy rule steers them into the tunnel; replies are wrapped
-// back into the SOCKS5 header and returned to the client.
-//
-// One association per control connection, as the RFC requires: the association
-// lives exactly as long as the TCP connection that requested it, and the caller
-// destroys this object when that connection ends.
-//
-// Fragmentation (FRAG != 0) is rejected. No mainstream implementation emits it,
-// and reassembly would mean holding partial datagrams with no way to know when
-// the rest is coming.
+// UDP ASSOCIATE (RFC 1928, sections 4 and 7). One association per control
+// connection; datagrams are relayed through kernel sockets bound to the TUN
+// address. FRAG != 0 is rejected.
 class UdpAssociate {
  public:
   struct Config {
-    // Address the relay socket binds to; the client is told where to send.
     std::string listen_address;
     std::string tun_address_ipv4;
     std::string tun_address_ipv6;
-    // How long an idle target socket is kept before it is closed.
     std::chrono::seconds session_timeout{60};
   };
 
@@ -55,24 +41,22 @@ class UdpAssociate {
   UdpAssociate(const UdpAssociate&) = delete;
   UdpAssociate& operator=(const UdpAssociate&) = delete;
 
-  // Opens the relay socket. On success the endpoint to report to the client in
-  // BND.ADDR/BND.PORT is available through BoundEndpoint().
+  // On success BoundEndpoint() holds what to report as BND.ADDR/BND.PORT.
   bool Open(boost::system::error_code& ec);
 
   const boost::asio::ip::udp::endpoint& BoundEndpoint() const noexcept {
     return bound_;
   }
 
-  // Relays until the object is closed. Returns when the relay socket fails,
-  // which is how the caller learns the association ended.
+  // Returns when the relay socket fails - that is how the caller learns the
+  // association ended.
   boost::asio::awaitable<void> Run();
 
   void Close();
 
  private:
-  // One target the client talks to. Each gets its own socket bound to the TUN
-  // address so the kernel keeps the source port stable, which is what NAT on
-  // the far side expects.
+  // Own socket per target, bound to the TUN address so the source port stays
+  // stable for NAT on the far side.
   struct Session {
     boost::asio::ip::udp::socket socket;
     boost::asio::ip::udp::endpoint client;
@@ -88,8 +72,6 @@ class UdpAssociate {
       const std::uint8_t* data,
       std::size_t size);
 
-  // Pumps replies from one target socket back to the client until it errors or
-  // the association closes.
   boost::asio::awaitable<void> ReceiveLoop(Key key);
 
   Session* FindOrCreate(const Key& key,
@@ -105,8 +87,7 @@ class UdpAssociate {
 
   boost::asio::ip::udp::socket relay_;
   boost::asio::ip::udp::endpoint bound_;
-  // Set from the first datagram: the RFC lets the client announce the address
-  // it will send from, but in practice everyone sends zeroes and we learn it.
+  // Learned from the first datagram: clients announce zeroes in practice.
   boost::asio::ip::udp::endpoint client_;
   std::map<Key, std::unique_ptr<Session>> sessions_;
   bool closed_ = false;

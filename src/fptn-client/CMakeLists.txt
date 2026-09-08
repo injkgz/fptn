@@ -69,8 +69,6 @@ add_executable(
   routing/route_manager.h
   routing/route_manager.cpp
   socks/socks5_server.cpp
-  socks/policy_route.cpp
-  socks/tunnel_resolver.cpp
   socks/udp_associate.cpp
   config/config_file.cpp
   config/config_file.h

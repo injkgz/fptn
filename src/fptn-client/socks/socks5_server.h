@@ -11,14 +11,62 @@ Distributed under the MIT License (https://opensource.org/licenses/MIT)
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/ip/address.hpp>
 #include <boost/asio/ip/tcp.hpp>
 
-#include "fptn-client/socks/tunnel_resolver.h"
 
 namespace fptn::socks {
+
+class PolicyRoute {
+ public:
+  struct Config {
+    std::string tun_interface_name;
+    std::string tun_address_ipv4;
+    std::string tun_address_ipv6;
+    std::uint32_t table_id = 100;
+    std::uint32_t rule_priority = 10000;
+  };
+
+  explicit PolicyRoute(Config config);
+  ~PolicyRoute();
+
+  PolicyRoute(const PolicyRoute&) = delete;
+  PolicyRoute& operator=(const PolicyRoute&) = delete;
+
+  // Idempotent: removes leftovers from a previous run before adding.
+  bool Apply();
+  void Clean();
+
+ private:
+  Config config_;
+  bool applied_ = false;
+};
+
+class TunnelResolver {
+ public:
+  struct Config {
+    std::string dns_server_ipv4;
+    std::string bind_address_ipv4;
+    int timeout_ms = 4000;
+  };
+
+  explicit TunnelResolver(Config config);
+
+  // An empty result means the name could not be resolved.
+  // A is tried first, AAAA on failure.
+  boost::asio::awaitable<std::vector<boost::asio::ip::address>> Resolve(
+      std::string host);
+
+ private:
+  boost::asio::awaitable<std::vector<boost::asio::ip::address>> Query(
+      const std::string& host, std::uint16_t qtype);
+
+  Config config_;
+};
 
 // SOCKS5 entry point for coexistence with a transparent proxy in front of the
 // client. CONNECT and UDP ASSOCIATE, so QUIC and plain UDP traverse it too;
