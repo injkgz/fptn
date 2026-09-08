@@ -749,6 +749,7 @@ int main(int argc, char* argv[]) {
     }
     fptn::utils::speed_estimator::ServerInfo selected_server;
     std::string pre_obtained_token;
+    bool server_pinned = false;
     try {
       const auto servers = ExcludeServers(
           CollectServers(access_tokens, sni, censorship_strategy),
@@ -765,6 +766,7 @@ int main(int argc, char* argv[]) {
         auto server_opt = FindPreferredServer(servers, preferred_server);
         if (server_opt.has_value()) {
           selected_server = std::move(*server_opt);
+          server_pinned = true;
         } else {
           SPDLOG_WARN("Server '{}' does not exist! Check your token!",
               preferred_server);
@@ -962,8 +964,10 @@ int main(int argc, char* argv[]) {
     }
 
     /* start event loop */
+    // Not while a server is pinned by name: a restart would pin the same one
+    // again, and asking for it is the user's decision.
     std::unique_ptr<LatencyWatchdog> watchdog;
-    if (max_ping > 0) {
+    if (max_ping > 0 && !server_pinned) {
       watchdog = std::make_unique<LatencyWatchdog>(
           selected_server, sni, censorship_strategy, max_ping);
     }
