@@ -10,8 +10,10 @@ Distributed under the MIT License (https://opensource.org/licenses/MIT)
 #include <unistd.h>  // NOLINT(build/include_order)
 #endif
 
+#include <algorithm>
 #include <charconv>
 #include <memory>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -26,6 +28,7 @@ Distributed under the MIT License (https://opensource.org/licenses/MIT)
 #include "common/logger/logger.h"
 #include "common/network/ip_address.h"
 #include "common/network/net_interface.h"
+#include "common/utils/utils.h"
 
 #include "config/config_file.h"
 #include "fptn-protocol-lib/https/obfuscator/methods/detector.h"
@@ -43,6 +46,67 @@ Distributed under the MIT License (https://opensource.org/licenses/MIT)
 #include "fptn-client/socks/policy_route.h"
 #include "fptn-client/socks/socks5_server.h"
 #include "fptn-protocol-lib/https/socket_options.h"
+
+namespace {
+
+using fptn::utils::speed_estimator::ServerInfo;
+
+// Every server of every token, each carrying the credentials of the token
+// it came from. One key or a dozen, what leaves here is a single pool: the
+// login race and --preferred-server then work the same way whether the
+// servers belong to one service or several.
+std::vector<ServerInfo> CollectServers(const std::vector<std::string>& tokens,
+    const std::string& sni,
+    fptn::protocol::https::CensorshipStrategy censorship_strategy) {
+  std::vector<ServerInfo> servers;
+
+  for (const auto& token : tokens) {
+    fptn::config::ConfigFile config(token, sni, censorship_strategy);
+    config.Parse();
+    for (auto server : config.GetServers()) {
+      server.username = config.GetUsername();
+      server.password = config.GetPassword();
+      server.service_name = config.GetServiceName();
+      servers.push_back(std::move(server));
+    }
+  }
+
+  return servers;
+}
+
+// Names repeat across services - two providers both call a server
+// "Server-1" - so a name may be qualified with the service it belongs to:
+// "MyService/Server-1". A bare name matches in any service, first wins.
+std::optional<ServerInfo> FindPreferredServer(
+    const std::vector<ServerInfo>& servers, const std::string& wanted) {
+  const auto normalize = [](const std::string& value) {
+    return fptn::common::utils::Trim(fptn::common::utils::ToLowerCase(value));
+  };
+  const std::string needle = normalize(wanted);
+  if (needle.empty()) {
+    return std::nullopt;
+  }
+
+  const auto it = std::ranges::find_if(servers, [&](const ServerInfo& server) {
+    return normalize(server.name) == needle ||
+           normalize(server.service_name + "/" + server.name) == needle;
+  });
+  if (it == servers.end()) {
+    return std::nullopt;
+  }
+  return *it;
+}
+
+// What to call a server in the log: qualified once more than one service
+// is in play.
+std::string DescribeServer(const ServerInfo& server) {
+  if (server.service_name.empty()) {
+    return server.name;
+  }
+  return fmt::format("{}/{}", server.service_name, server.name);
+}
+
+}  // namespace
 
 int main(int argc, char* argv[]) {
 #if defined(__linux__) || defined(__APPLE__)
@@ -72,7 +136,10 @@ int main(int argc, char* argv[]) {
 
     argparse::ArgumentParser args("fptn-client", FPTN_VERSION);
     // Required arguments
-    args.add_argument("--access-token").required().help("Access token");
+    args.add_argument("--access-token")
+        .append()
+        .default_value(std::vector<std::string>{})
+        .help("Access token. Repeat the flag to use several keys at once");
     // Optional arguments
     args.add_argument("--out-network-interface")
         .default_value("")
@@ -517,15 +584,23 @@ int main(int argc, char* argv[]) {
         fptn::common::utils::SplitCommaSeparated(blacklist_domains_str);
 
     /* check config */
-    const auto access_token = args.get<std::string>("--access-token");
-    fptn::config::ConfigFile config(access_token, sni, censorship_strategy);
+    const auto access_tokens =
+        args.get<std::vector<std::string>>("--access-token");
+    if (access_tokens.empty()) {
+      SPDLOG_ERROR("--access-token is required");
+      return EXIT_FAILURE;
+    }
     fptn::utils::speed_estimator::ServerInfo selected_server;
     std::string pre_obtained_token;
     try {
-      config.Parse();
+      const auto servers =
+          CollectServers(access_tokens, sni, censorship_strategy);
+      SPDLOG_INFO("Tokens: {}, servers: {}", access_tokens.size(),
+          servers.size());
+
       bool use_login_race = preferred_server.empty();
       if (!preferred_server.empty()) {
-        auto server_opt = config.GetServer(preferred_server);
+        auto server_opt = FindPreferredServer(servers, preferred_server);
         if (server_opt.has_value()) {
           selected_server = std::move(*server_opt);
         } else {
@@ -535,7 +610,10 @@ int main(int argc, char* argv[]) {
         }
       }
       if (use_login_race) {
-        auto login_result = config.FindServerByLogin(10);
+        // One race over the servers of every token: whichever key answers first
+        // is the one this run connects with.
+        auto login_result = fptn::utils::speed_estimator::FindServerByLogin(
+            sni, servers, censorship_strategy, 10);
         if (!login_result) {
           SPDLOG_ERROR("All servers unavailable!");
           return EXIT_FAILURE;
@@ -573,7 +651,8 @@ int main(int argc, char* argv[]) {
         // version
         FPTN_VERSION,
         // server
-        selected_server.name, sni, selected_server.name, selected_server.host,
+        DescribeServer(selected_server), sni, selected_server.name,
+        selected_server.host,
         selected_server.port, bypass_method,
         // network
         using_gateway_ip.ToString(), out_network_interface_name,
@@ -601,8 +680,8 @@ int main(int argc, char* argv[]) {
     if (!pre_obtained_token.empty()) {
       http_client->SetAccessToken(pre_obtained_token);
     }
-    const bool status =
-        http_client->Login(config.GetUsername(), config.GetPassword());
+    const bool status = http_client->Login(
+        selected_server.username, selected_server.password);
     if (!status) {
       SPDLOG_ERROR("Login failed (code {}): {}", http_client->LatestErrorCode(),
           http_client->LatestError());

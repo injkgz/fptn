@@ -185,6 +185,17 @@ function checkUpdate() {
 		});
 }
 
+// Ключей может быть несколько: UCI хранит их списком, а конфиг прежних версий -
+// одиночным option. Отсюда всегда выходит массив.
+function accessTokens() {
+	var value = uci.get('fptn', 'config', 'access_token');
+	if (value == null)
+		return [];
+	return (Array.isArray(value) ? value : String(value).split(/\s+/))
+		.map(function (item) { return String(item).trim(); })
+		.filter(function (item) { return item.length > 0; });
+}
+
 function diagnose() {
 	var tun = uci.get('fptn', 'config', 'tun_interface_name') || 'tun0';
 
@@ -254,10 +265,12 @@ function diagnose() {
 
 		return [
 			{
-				ok: uci.get('fptn', 'config', 'access_token') ? true : false,
+				ok: accessTokens().length > 0,
 				title: 'Access token is set',
-				detail: uci.get('fptn', 'config', 'access_token')
-					? 'configured' : 'empty, the client refuses to start'
+				detail: accessTokens().length > 0
+					? (accessTokens().length === 1 ? 'configured'
+						: accessTokens().length + ' keys configured')
+					: 'empty, the client refuses to start'
 			},
 			{
 				ok: uci.get('fptn', 'config', 'enabled') === '1',
@@ -430,7 +443,7 @@ function lastRunHas(log, needles) {
 }
 
 function problemNote(log, connected) {
-	if (!uci.get('fptn', 'config', 'access_token'))
+	if (accessTokens().length === 0)
 		return 'no token configured';
 
 	if (connected)
@@ -563,7 +576,6 @@ return view.extend({
 		var m, s, o;
 		var running = data[0].running;
 		var state = describe(running, data[1]);
-		var token = uci.get('fptn', 'config', 'access_token');
 
 		reconcile(running);
 		poll.add(refresh, 5);
@@ -579,6 +591,7 @@ return view.extend({
 			return '<ol style="margin:0;padding-inline-start:1.5em">' +
 				'<li>Open ' + botLink + ' in Telegram and copy the access token.</li>' +
 				'<li>Paste it into the "Access token" field below and press "Save &amp; Apply".</li>' +
+				'<li>Got keys from several services? Put each on its own line.</li>' +
 				'</ol>';
 		};
 
@@ -637,16 +650,32 @@ return view.extend({
 			};
 		});
 
-		o = s.taboption('general', form.TextValue, 'access_token', 'Access token',
+		o = s.taboption('general', form.TextValue, 'access_token', 'Access tokens',
 			'Token issued by ' + botLink + ' in Telegram. It carries the server ' +
-			'list, so get a new one when the current token expires.');
-		o.rows = 4;
+			'list, so get a new one when the current token expires. ' +
+			'One key per line - the servers of every key are tried together, ' +
+			'and the client connects to whichever answers first.');
+		o.rows = 6;
 		o.rmempty = false;
+		o.cfgvalue = function () {
+			return accessTokens().join('\n');
+		};
+		o.write = function (section_id, value) {
+			var list = String(value || '').split(/\s+/)
+				.map(function (item) { return item.trim(); })
+				.filter(function (item) { return item.length > 0; });
+			// Один ключ пишем option'ом: так конфиг остаётся читаемым для тех
+			// версий пакета, что списка не знают.
+			uci.set('fptn', section_id, 'access_token',
+				list.length === 1 ? list[0] : list);
+		};
 
 		o = s.taboption('general', form.Value, 'preferred_server', 'Preferred server',
 			'Name of the server to connect to, as listed by the Telegram bot. ' +
 			'Leave empty and the client logs in to every server at once and ' +
-			'keeps the one that answers first.');
+			'keeps the one that answers first. With several keys a name that ' +
+			'appears in more than one of them can be qualified with its ' +
+			'service: "MyService/Server-1".');
 		o.rmempty = true;
 
 		o = s.taboption('general', form.ListValue, 'connection_strategy',
