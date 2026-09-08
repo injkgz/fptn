@@ -2,6 +2,10 @@ config fptn 'config'
 	option enabled '0'
 	option access_token ''
 	option preferred_server ''
+	# Регулярка: серверы с подходящим именем в пул не попадают.
+	option exclude_servers ''
+	# Предел задержки, мс. 0 - без ограничения.
+	option max_ping '0'
 	option out_network_interface ''
 	option tun_interface_name 'tun0'
 	option sni ''

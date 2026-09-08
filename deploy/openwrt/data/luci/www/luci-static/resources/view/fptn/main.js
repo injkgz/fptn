@@ -678,6 +678,21 @@ return view.extend({
 			'service: "MyService/Server-1".');
 		o.rmempty = true;
 
+		o = s.taboption('general', form.Value, 'exclude_servers',
+			'Exclude servers',
+			'Regular expression. Servers whose name matches it are left out ' +
+			'of the pool - "Russia|Vietnam" drops both, "^FPTN.ONLINE/" drops ' +
+			'a whole service.');
+		o.rmempty = true;
+		o.placeholder = 'Russia|Vietnam';
+
+		o = s.taboption('general', form.Value, 'max_ping', 'Latency limit, ms',
+			'A server slower than this is not picked, and the one in use is ' +
+			'replaced once it stays over the limit. Empty or 0 - no limit.');
+		o.rmempty = true;
+		o.datatype = 'uinteger';
+		o.placeholder = '0';
+
 		o = s.taboption('general', form.ListValue, 'connection_strategy',
 			'Connection strategy',
 			'How many tunnels are kept open at the same time. Every tunnel is ' +

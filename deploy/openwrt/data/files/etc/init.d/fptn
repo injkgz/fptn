@@ -200,6 +200,8 @@ start_service() {
 	append_option socks_route_table socks-route-table
 
 	append_option preferred_server preferred-server
+	append_option exclude_servers exclude-servers
+	append_option max_ping max-ping
 	append_option tun_interface_name tun-interface-name
 	append_option sni sni
 	append_option bypass_method bypass-method

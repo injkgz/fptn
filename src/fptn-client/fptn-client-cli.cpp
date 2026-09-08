@@ -11,13 +11,21 @@ Distributed under the MIT License (https://opensource.org/licenses/MIT)
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <charconv>
+#include <chrono>
+#include <condition_variable>
+#include <csignal>
+#include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <regex>
 #include <set>
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -106,6 +114,131 @@ std::string DescribeServer(const ServerInfo& server) {
   return fmt::format("{}/{}", server.service_name, server.name);
 }
 
+// Drops the servers whose name matches the pattern. Both the bare name and
+// "service/name" are tested, so a whole service can be excluded at once.
+std::vector<ServerInfo> ExcludeServers(
+    const std::vector<ServerInfo>& servers, const std::string& pattern) {
+  if (pattern.empty()) {
+    return servers;
+  }
+
+  const std::regex re(pattern, std::regex::ECMAScript | std::regex::icase);
+  std::vector<ServerInfo> kept;
+  for (const auto& server : servers) {
+    if (std::regex_search(server.name, re) ||
+        std::regex_search(DescribeServer(server), re)) {
+      SPDLOG_INFO("Excluded server: {}", DescribeServer(server));
+      continue;
+    }
+    kept.push_back(server);
+  }
+  return kept;
+}
+
+// The login race returns whichever server answers first. With a latency limit
+// set that is not enough: the winner is measured, and a server over the limit
+// is dropped and the race repeated. Three rounds, then the best of a bad lot.
+std::optional<fptn::utils::speed_estimator::LoginResult> SelectServer(
+    std::vector<ServerInfo> servers,
+    const std::string& sni,
+    fptn::protocol::https::CensorshipStrategy censorship_strategy,
+    int max_ping_ms) {
+  std::optional<fptn::utils::speed_estimator::LoginResult> last;
+
+  for (int round = 0; round < 3 && !servers.empty(); ++round) {
+    auto result = fptn::utils::speed_estimator::FindServerByLogin(
+        sni, servers, censorship_strategy, 10);
+    if (!result) {
+      return last;
+    }
+    if (max_ping_ms <= 0) {
+      return result;
+    }
+
+    const auto ms = fptn::utils::speed_estimator::GetDownloadTimeMs(
+        result->server, sni, 5, result->server.md5_fingerprint,
+        censorship_strategy);
+    if (ms <= static_cast<std::uint64_t>(max_ping_ms)) {
+      return result;
+    }
+
+    SPDLOG_WARN("{} answered in {} ms, over the {} ms limit - trying another",
+        DescribeServer(result->server),
+        ms == UINT64_MAX ? -1 : static_cast<std::int64_t>(ms), max_ping_ms);
+    last = result;
+    std::erase_if(servers, [&](const ServerInfo& server) {
+      return server.host == result->server.host &&
+             server.port == result->server.port;
+    });
+  }
+
+  return last;
+}
+
+// Keeps an eye on the server in use: gone, or slower than the limit three
+// checks in a row, and the process asks to be restarted. procd (or systemd)
+// brings it back up, and the selection above then picks a different server.
+class LatencyWatchdog final {
+ public:
+  LatencyWatchdog(ServerInfo server,
+      std::string sni,
+      fptn::protocol::https::CensorshipStrategy censorship_strategy,
+      int max_ping_ms)
+      : server_(std::move(server)),
+        sni_(std::move(sni)),
+        censorship_strategy_(censorship_strategy),
+        max_ping_ms_(max_ping_ms) {
+    thread_ = std::thread([this] { Run(); });
+  }
+
+  ~LatencyWatchdog() {
+    {
+      const std::lock_guard<std::mutex> lock(mutex_);
+      running_ = false;
+    }
+    cv_.notify_all();
+    if (thread_.joinable()) {
+      thread_.join();
+    }
+  }
+
+ private:
+  void Run() {
+    int over_limit = 0;
+    while (Wait(std::chrono::seconds(60))) {
+      const auto ms = fptn::utils::speed_estimator::GetDownloadTimeMs(
+          server_, sni_, 5, server_.md5_fingerprint, censorship_strategy_);
+      if (ms <= static_cast<std::uint64_t>(max_ping_ms_)) {
+        over_limit = 0;
+        continue;
+      }
+      if (++over_limit < 3) {
+        continue;
+      }
+      SPDLOG_WARN("{} is over the {} ms limit, restarting to switch server",
+          DescribeServer(server_), max_ping_ms_);
+      std::raise(SIGTERM);
+      return;
+    }
+  }
+
+  bool Wait(std::chrono::seconds period) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    cv_.wait_for(lock, period, [this] { return !running_; });
+    return running_;
+  }
+
+  const ServerInfo server_;
+  const std::string sni_;
+  const fptn::protocol::https::CensorshipStrategy censorship_strategy_;
+  const int max_ping_ms_;
+
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  bool running_ = true;
+  std::thread thread_;
+};
+
 }  // namespace
 
 int main(int argc, char* argv[]) {
@@ -173,6 +306,30 @@ int main(int argc, char* argv[]) {
     args.add_argument("--preferred-server")
         .default_value("")
         .help("Preferred server name (case-insensitive)");
+    args.add_argument("--exclude-servers")
+        .default_value(std::string(""))
+        .help(
+            "Regular expression: servers whose name matches it are left out "
+            "of the pool, e.g. 'Russia|Vietnam'");
+    args.add_argument("--max-ping")
+        .default_value(0)
+        .help(
+            "Latency limit in milliseconds. A server over it is not picked, "
+            "and the one in use is replaced once it stays over the limit")
+        .action([](const std::string& v) -> int {
+          if (v.empty()) {
+            return 0;
+          }
+          int value = 0;
+          const auto [end, error] =
+              std::from_chars(v.data(), v.data() + v.size(), value);
+          if (error != std::errc() || end != v.data() + v.size() ||
+              value < 0) {
+            throw std::runtime_error(
+                fmt::format("Invalid --max-ping value '{}'", v));
+          }
+          return value;
+        });
     args.add_argument("--tun-interface-name")
         .default_value("tun0")
         .help("Network interface name")
@@ -419,6 +576,8 @@ int main(int argc, char* argv[]) {
         fptn::common::network::IPv6Address::Create(param_gateway_ipv6);
 
     const auto preferred_server = args.get<std::string>("--preferred-server");
+    const auto exclude_servers = args.get<std::string>("--exclude-servers");
+    const auto max_ping = args.get<int>("--max-ping");
 
     const auto tun_interface_name =
         args.get<std::string>("--tun-interface-name");
@@ -593,8 +752,13 @@ int main(int argc, char* argv[]) {
     fptn::utils::speed_estimator::ServerInfo selected_server;
     std::string pre_obtained_token;
     try {
-      const auto servers =
-          CollectServers(access_tokens, sni, censorship_strategy);
+      const auto servers = ExcludeServers(
+          CollectServers(access_tokens, sni, censorship_strategy),
+          exclude_servers);
+      if (servers.empty()) {
+        SPDLOG_ERROR("No servers left after --exclude-servers");
+        return EXIT_FAILURE;
+      }
       SPDLOG_INFO("Tokens: {}, servers: {}", access_tokens.size(),
           servers.size());
 
@@ -610,10 +774,10 @@ int main(int argc, char* argv[]) {
         }
       }
       if (use_login_race) {
-        // One race over the servers of every token: whichever key answers first
-        // is the one this run connects with.
-        auto login_result = fptn::utils::speed_estimator::FindServerByLogin(
-            sni, servers, censorship_strategy, 10);
+        // One race over the servers of every token: whichever key answers
+        // first is the one this run connects with.
+        auto login_result =
+            SelectServer(servers, sni, censorship_strategy, max_ping);
         if (!login_result) {
           SPDLOG_ERROR("All servers unavailable!");
           return EXIT_FAILURE;
@@ -802,7 +966,13 @@ int main(int argc, char* argv[]) {
     }
 
     /* start event loop */
+    std::unique_ptr<LatencyWatchdog> watchdog;
+    if (max_ping > 0) {
+      watchdog = std::make_unique<LatencyWatchdog>(
+          selected_server, sni, censorship_strategy, max_ping);
+    }
     fptn::utils::WaitForSignal(vpn_client);
+    watchdog.reset();
 
     /* clean */
     if (socks_server) {
