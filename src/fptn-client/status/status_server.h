@@ -19,33 +19,33 @@ Distributed under the MIT License (https://opensource.org/licenses/MIT)
 
 namespace fptn::client::status {
 
-// Локальный HTTP-эндпоинт со списком серверов и их задержками.
+// A local HTTP endpoint exposing the server pool and its latency.
 //
-// До него у клиента не было ни одного машиночитаемого выхода: только строки
-// в логе и код возврата процесса. Прозрачный прокси, который держит клиент
-// помощником, не мог показать ни пул, ни пинги - ему просто неоткуда было их
-// взять.
+// Before it the client had no machine-readable output at all: only log lines
+// and the process exit code. A transparent proxy running the client as its
+// helper could show neither the pool nor the latency - it had nowhere to read
+// them from.
 //
-// Форма ответов повторяет Clash API (sing-box, mihomo): тот же JSON уже умеют
-// читать и панели, и обвязки на роутерах, поэтому ничего нового учить не
-// нужно.
+// The response shape follows the Clash API (sing-box, mihomo): dashboards and
+// router-side tooling already parse that JSON, so nothing new has to be
+// learned.
 class StatusServer final {
  public:
   struct Options {
     std::string listen_address = "127.0.0.1";
     std::uint16_t listen_port = 0;
-    // Пустой секрет означает "без проверки". Так делает и sing-box, но по
-    // умолчанию слушаем только петлю, чтобы это не превращалось в дыру.
+    // An empty secret means "no check", the same as sing-box does, but the
+    // default listen address is the loopback so this cannot become a hole.
     std::string secret;
   };
 
-  // Замер по требованию: вернуть задержку в мс, 0 - неудача.
-  // NOLINTNEXTLINE(readability/casting) - это тип функции, а не C-каст
+  // On-demand probe: returns the latency in ms, 0 on failure.
+  // NOLINTNEXTLINE(readability/casting) - a function type, not a C cast
   using DelayProbeSignature = std::uint32_t(const ServerInfo&, int);
   using DelayProbe = std::function<DelayProbeSignature>;
-  // Переключение на другой сервер. true, если запрос принят.
+  // Switch to another server. true if the request was accepted.
   using SwitchServer = std::function<bool(const ServerInfo& server)>;
-  // Состояние туннеля и служб - всё, что знает только сам клиент.
+  // Tunnel and service state - everything only the client itself knows.
   using StatusProvider = std::function<nlohmann::json()>;
 
   StatusServer(Options options, std::shared_ptr<ServerRegistry> registry);

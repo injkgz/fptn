@@ -30,11 +30,12 @@ class UdpAssociate {
     std::string tun_address_ipv4;
     std::string tun_address_ipv6;
     std::chrono::seconds session_timeout{60};
-    // Уборка идёт по своему таймеру, а не на каждой датаграмме: молчащий
-    // клиент иначе оставлял бы сокеты целей открытыми до конца ассоциации.
+    // Cleanup runs on its own timer rather than on every datagram: a silent
+    // client would otherwise keep target sockets open for the whole
+    // association.
     std::chrono::seconds sweep_interval{15};
-    // Сокет на каждую цель: без потолка одна ассоциация с активным QUIC
-    // способна съесть все дескрипторы процесса.
+    // One socket per target: without a cap, a single association with busy
+    // QUIC can eat every descriptor the process has.
     std::size_t max_sessions = 128;
   };
 

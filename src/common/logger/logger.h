@@ -152,9 +152,9 @@ inline bool init(const std::string& app_name) {
     }
     auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
 #ifdef FPTN_OPENWRT
-    // На роутере /var/log - симлинк на tmpfs, то есть лог живёт в оперативной
-    // памяти, а её там 512 МБ на всё. Дефолтные 12 МБ на файл при трёх файлах
-    // съедали бы 36 МБ ОЗУ: держим 2 МБ на два файла.
+    // On a router /var/log is a symlink to tmpfs, so the log lives in RAM -
+    // and there is 512 MB of it for everything. The default 12 MB per file
+    // across three files would eat 36 MB: keep 2 MB across two.
     constexpr std::size_t kLogFileSize = 1024 * 1024;
     constexpr std::size_t kLogFiles = 2;
 #else

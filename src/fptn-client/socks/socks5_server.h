@@ -54,12 +54,13 @@ class TunnelResolver {
     std::string dns_server_ipv4;
     std::string bind_address_ipv4;
     int timeout_ms = 4000;
-    // Запрос уходит внутрь тоннеля, поэтому промах кэша стоит целого круга до
-    // резолвера. Ответ живёт по своему TTL, зажатому в эти границы.
+    // The query travels inside the tunnel, so a cache miss costs a full round
+    // trip to the resolver. An answer lives for its own TTL, clamped to these
+    // bounds.
     std::chrono::seconds min_ttl{10};
     std::chrono::seconds max_ttl{600};
     std::size_t max_cache_entries = 512;
-    // Датаграмма теряется тихо, поэтому одну потерю переживаем повтором.
+    // A datagram is lost silently, so one loss is covered by a retry.
     int attempts = 2;
   };
 
@@ -74,8 +75,8 @@ class TunnelResolver {
   struct Answer {
     std::vector<boost::asio::ip::address> addresses;
     std::chrono::seconds ttl{0};
-    // Пустой ответ и молчание резолвера - разные вещи: первый кэшируем,
-    // второй заставляет пробовать снова.
+    // An empty answer and a silent resolver are different things: the first
+    // is cached, the second makes us try again.
     bool answered = false;
     bool truncated = false;
   };
@@ -85,7 +86,7 @@ class TunnelResolver {
     std::chrono::steady_clock::time_point expires_at;
   };
 
-  // Транспорт значения не имеет: разбирается уже принятое сообщение.
+  // The transport does not matter: an already received message is parsed.
   static Answer ParseResponse(const std::uint8_t* data, std::size_t size,
       std::uint16_t query_id, const std::string& host);
 
@@ -101,12 +102,12 @@ class TunnelResolver {
   void StoreCache(const std::string& host,
       const std::vector<boost::asio::ip::address>& addresses,
       std::chrono::seconds ttl);
-  // Один и тот же обрыв связи повторяется на каждом соединении; в лог он
-  // попадает по разу на переход состояния.
+  // The same outage repeats on every connection; it reaches the log once per
+  // state change.
   void ReportReachable(bool reachable, const std::string& host);
 
   Config config_;
-  // Резолвер живёт только в потоке io_context сервера, поэтому без блокировок.
+  // The resolver lives only on the server io_context thread, so no locking.
   std::unordered_map<std::string, CacheEntry> cache_;
   bool dns_unreachable_ = false;
 };
@@ -124,11 +125,11 @@ class Socks5Server {
     std::string tun_address_ipv6;
     std::string dns_server_ipv4;
     int connect_timeout_ms = 10000;
-    // Дескрипторов на сессию уходит два, и на роутере их немного: за потолком
-    // сервер отказывает клиенту, а не упирается в EMFILE.
+    // A session costs two descriptors, and a router has few: past the cap the
+    // server refuses the client instead of hitting EMFILE.
     std::size_t max_sessions = 512;
-    // Простаивающая сессия держит оба дескриптора до конца жизни процесса,
-    // если её не закрыть.
+    // An idle session holds both descriptors for the life of the process
+    // unless it is closed.
     std::chrono::seconds idle_timeout{300};
   };
 
@@ -138,21 +139,21 @@ class Socks5Server {
   Socks5Server(const Socks5Server&) = delete;
   Socks5Server& operator=(const Socks5Server&) = delete;
 
-  // Порт открывается отдельно от обслуживания: ZeroBlock ждёт готовности
-  // помощника считаные секунды, а логин-гонка по нескольким десяткам серверов
-  // занимает до минуты. Listen() поднимает слушающий сокет сразу, соединения
-  // копятся в backlog ядра, а Serve() начинает их разбирать, когда туннель
-  // готов и адреса известны.
+  // Opening the port is separate from serving it: ZeroBlock waits only
+  // seconds for the helper to become ready, while a login race across dozens
+  // of servers takes up to a minute. Listen() brings the listening socket up
+  // at once so connections queue in the kernel backlog, and Serve() starts
+  // handling them when the tunnel is ready and the addresses are known.
   bool Listen();
   void SetTunnel(const std::string& tun_address_ipv4,
       const std::string& tun_address_ipv6,
       const std::string& dns_server_ipv4);
   bool Serve();
-  // Listen() + Serve() одним вызовом, для случая, когда ждать нечего.
+  // Listen() + Serve() in one call, for when there is nothing to wait for.
   bool Start();
   void Stop();
   bool IsRunning() const noexcept { return running_.load(); }
-  // Счётчики уже велись для отказа при переполнении, но наружу не выходили.
+  // The counters were already kept to refuse on overflow, but never exposed.
   std::size_t ActiveSessions() const noexcept {
     return active_sessions_.load();
   }
@@ -165,8 +166,8 @@ class Socks5Server {
   boost::asio::awaitable<void> AcceptLoop();
   boost::asio::awaitable<void> HandleSession(
       boost::asio::ip::tcp::socket client);
-  // Каждое чтение отодвигает таймер простоя; когда он всё-таки срабатывает,
-  // WatchIdle закрывает обе стороны и релей завершается сам.
+  // Every read pushes the idle timer back; when it does fire, WatchIdle
+  // closes both sides and the relay ends on its own.
   boost::asio::awaitable<void> Relay(boost::asio::ip::tcp::socket& from,
       boost::asio::ip::tcp::socket& to,
       boost::asio::steady_timer& idle);

@@ -67,9 +67,9 @@ std::optional<LoginResult> FindServerByLogin(const std::string& sni,
     return std::nullopt;
   }
 
-  // Раньше список перемешивался и опрашивалась случайная половина: быстрый
-  // сервер мог просто не попасть в выборку, и клиент про него не узнавал.
-  // Теперь опрашиваются все, но не больше kMaxProbeConcurrency разом.
+  // The list used to be shuffled and only a random half was probed: a fast
+  // server could simply miss the draw, and the client never learned about it.
+  // Now every server is probed, at most kMaxProbeConcurrency at a time.
   struct State {
     std::mutex mtx;
     std::condition_variable cv;
@@ -125,9 +125,9 @@ std::optional<LoginResult> FindServerByLogin(const std::string& sni,
           error = "unknown error";
         }
 
-        // Время логина - это и есть задержка до сервера: лёгкий запрос без
-        // скачивания тестового файла, поэтому число отражает канал, а не
-        // ширину полосы.
+        // The login time is the latency to the server: a small request with
+        // no test file to download, so the number describes the link rather
+        // than the bandwidth.
         const auto elapsed =
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - started)
@@ -154,8 +154,8 @@ std::optional<LoginResult> FindServerByLogin(const std::string& sni,
     return state->result.has_value() || state->completed == state->total;
   });
 
-  // Оставшиеся потоки домеривают пул в фоне и дописывают результаты через
-  // колбэк - выбор сервера их не ждёт.
+  // The remaining workers finish measuring the pool in the background and
+  // report through the callback - server selection does not wait for them.
   return state->result;
 }
 

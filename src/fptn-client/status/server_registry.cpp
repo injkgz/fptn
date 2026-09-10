@@ -30,8 +30,8 @@ std::uint64_t NowMs() {
           .count());
 }
 
-// Clash отдаёт время замера в RFC3339. Панели разбирают именно его, поэтому
-// формат держим таким же, а не unix-временем.
+// Clash reports the measurement time in RFC3339. Dashboards parse exactly
+// that, so the format is kept the same rather than unix time.
 std::string ToRfc3339(std::uint64_t ms) {
   if (ms == 0) {
     return {};
@@ -91,7 +91,7 @@ void ServerRegistry::Reset(const std::vector<ServerInfo>& servers) {
       continue;  // один и тот же узел пришёл из двух токенов
     }
     Entry entry;
-    // Замеры переживают пересборку пула: сервер тот же, мерить заново незачем.
+    // Measurements survive a pool rebuild: same server, no need to re-probe.
     if (const auto old = entries_.find(key); old != entries_.end()) {
       entry = old->second;
     }
@@ -115,7 +115,7 @@ void ServerRegistry::RecordProbe(const ServerInfo& server,
   const auto key = KeyOf(server);
   auto it = entries_.find(key);
   if (it == entries_.end()) {
-    // Сервер могли исключить из пула, пока проба была в полёте.
+    // The server may have left the pool while the probe was in flight.
     return;
   }
 
@@ -210,8 +210,8 @@ ServerStats ServerRegistry::Summarize(const Entry& entry) {
   if (counted != 0) {
     stats.average_ms = static_cast<std::uint32_t>(sum / counted);
   }
-  // Живым считаем сервер, у которого последняя проба удалась: одна
-  // неудача в середине окна ещё не повод вычёркивать узел.
+  // A server counts as alive when its latest probe succeeded: one failure in
+  // the middle of the window is no reason to strike the node out.
   stats.alive = !entry.window.empty() && entry.window.back().delay_ms != 0;
   return stats;
 }
@@ -282,8 +282,8 @@ nlohmann::json ServerRegistry::ToClashProxies() const {
     const auto name = DisplayName(entry.info);
     const auto stats = Summarize(entry);
 
-    // Clash кладёт в history не всё окно, а последний замер: панели
-    // читают history[0] и ждут там свежее значение.
+    // Clash puts only the latest measurement in history, not the whole
+    // window: dashboards read history[0] and expect a fresh value there.
     nlohmann::json history = nlohmann::json::array();
     if (!entry.window.empty()) {
       const auto& last = entry.window.back();
@@ -304,8 +304,8 @@ nlohmann::json ServerRegistry::ToClashProxies() const {
     current_name = all.front().get<std::string>();
   }
 
-  // Группа-селектор: через неё прозрачный прокси видит текущий выбор и
-  // может переключить сервер тем же PUT, что и у sing-box.
+  // The selector group: through it a transparent proxy sees the current
+  // choice and can switch servers with the same PUT as with sing-box.
   proxies["FPTN"] = nlohmann::json{{"type", "Selector"}, {"name", "FPTN"},
       {"udp", true}, {"history", nlohmann::json::array()},
       {"now", current_name}, {"all", all}};

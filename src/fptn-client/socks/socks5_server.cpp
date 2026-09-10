@@ -59,12 +59,12 @@ constexpr std::uint8_t kRepTtlExpired = 0x06;
 constexpr std::uint8_t kRepCommandNotSupported = 0x07;
 constexpr std::uint8_t kRepAddressNotSupported = 0x08;
 
-// По буферу на каждое направление, то есть два на сессию: при потолке в 512
-// сессий 32 КБ обошлись бы в 32 МБ только на релей.
+// One buffer per direction, so two per session: with a cap of 512 sessions
+// 32 KB would cost 32 MB on relaying alone.
 constexpr std::size_t kRelayBufferSize = 16 * 1024;
 
-// Потолок паузы между попытками принять соединение, когда кончились
-// дескрипторы.
+// Upper bound on the pause between accept attempts once descriptors run
+// out.
 constexpr std::chrono::milliseconds kAcceptBackoffMax{2000};
 
 std::uint8_t ErrorToReply(const boost::system::error_code& ec) {
@@ -120,8 +120,8 @@ boost::asio::awaitable<void> SendReplyWithEndpoint(
 }
 
 
-// Проходит приветствие и отвечает отказом с кодом: клиент, уже отправивший
-// запрос, получает внятную ошибку вместо закрытого сокета.
+// Completes the greeting and answers with a refusal code: a client that has
+// already sent its request gets a clear error instead of a closed socket.
 boost::asio::awaitable<void> RefuseSession(
     boost::asio::ip::tcp::socket& client, std::uint8_t reply) {
   boost::system::error_code ec;
@@ -147,8 +147,8 @@ boost::asio::awaitable<void> RefuseSession(
     co_return;
   }
 
-  // Запрос дочитывать не обязательно: ответ с кодом отказа допустим в любой
-  // момент после согласования метода.
+  // Reading the request to the end is not required: a refusal reply is valid
+  // at any point after the method has been negotiated.
   const std::array<std::uint8_t, 10> response{
       kVersion, reply, 0x00, kAtypIPv4, 0, 0, 0, 0, 0, 0};
   co_await boost::asio::async_write(client, boost::asio::buffer(response),
@@ -160,8 +160,8 @@ boost::asio::awaitable<void> RefuseSession(
 
 }  // namespace
 
-// Резолвер собирается в Serve(): к тому моменту известны адрес туннеля и DNS,
-// а до этого их может ещё не быть.
+// The resolver is built in Serve(): by then the tunnel address and DNS are
+// known, and before that they may not exist yet.
 Socks5Server::Socks5Server(Config config) : config_(std::move(config)) {}
 
 Socks5Server::~Socks5Server() { Stop(); }
@@ -279,9 +279,9 @@ boost::asio::awaitable<void> Socks5Server::AcceptLoop() {
       if (!running_.load()) {
         break;
       }
-      // Дескрипторы кончились: повторять сразу же означает крутиться на месте,
-      // забивая процессор и лог. Растущая пауза даёт закрыться тому, что уже
-      // отработало.
+      // Descriptors ran out: retrying at once means spinning in place, eating
+      // CPU and filling the log. A growing pause lets whatever has finished
+      // close down.
       if (ec == boost::asio::error::no_descriptors ||
           ec == boost::system::errc::too_many_files_open_in_system) {
         pause = pause.count() == 0 ? std::chrono::milliseconds(100)
@@ -304,13 +304,13 @@ boost::asio::awaitable<void> Socks5Server::AcceptLoop() {
     pause = std::chrono::milliseconds(0);
     reported = false;
 
-    // За потолком клиенту отвечают отказом - это лучше, чем принять соединение
-    // и оставить его висеть без дескрипторов на исходящее.
+    // Past the cap the client is refused - better than accepting a connection
+    // and leaving it hanging with no descriptors for the outbound side.
     if (active_sessions_.load() >= config_.max_sessions) {
       SPDLOG_WARN("SOCKS5: session limit {} reached, refusing",
           config_.max_sessions);
-      // Отказ доводится до клиента по протоколу: он получит ошибку сразу, а не
-      // будет ждать таймаута на оборванном соединении.
+      // The refusal is delivered over the protocol: the client sees an error
+      // right away instead of waiting for a timeout on a dead connection.
       boost::asio::co_spawn(
           ioc_,
           [sock = std::move(client)]() mutable
@@ -520,13 +520,14 @@ boost::asio::awaitable<void> Socks5Server::HandleSession(
       target_port);
 
   // --- relay data in both directions ---
-  // Таймер простоя перезаводится на каждом прочитанном куске; когда он всё же
-  // срабатывает, обе стороны закрываются и релеи выходят по ошибке.
+  // The idle timer is rearmed on every chunk read; when it does fire, both
+  // sides are closed and the relays exit with an error.
   //
-  // Сторож стоит через ||, а не в общей цепочке &&: иначе он досыпает свой срок
-  // уже после того, как оба релея закончились, и всё это время держит фрейм
-  // сессии живым - а вместе с ним оба сокета. На потоке в сотни соединений в
-  // минуту дескрипторы копились тысячами и упирались в потолок сессий.
+  // The watchdog sits behind || rather than in the shared && chain: otherwise
+  // it sleeps out its full term after both relays have finished, keeping the
+  // session frame alive all that time - and both sockets with it. On a stream
+  // of hundreds of connections a minute, descriptors piled up by the thousand
+  // and hit the session cap.
   boost::asio::steady_timer idle(executor);
   idle.expires_after(config_.idle_timeout);
   co_await((Relay(client, remote, idle) && Relay(remote, client, idle)) ||
@@ -536,8 +537,8 @@ boost::asio::awaitable<void> Socks5Server::HandleSession(
   remote.close(ec);
 }
 
-// Ждёт, пока таймер простоя не сработает по-настоящему: каждое чтение сдвигает
-// его вперёд, и тогда ожидание отменяется и начинается заново.
+// Waits until the idle timer really fires: every read pushes it forward, at
+// which point the wait is cancelled and starts over.
 boost::asio::awaitable<void> Socks5Server::WatchIdle(
     boost::asio::steady_timer& idle,
     boost::asio::ip::tcp::socket& client,
@@ -726,8 +727,8 @@ void TunnelResolver::StoreCache(const std::string& host,
   }
   ttl = std::clamp(ttl, config_.min_ttl, config_.max_ttl);
 
-  // Кэш на роутере не должен расти без предела. Сначала выбрасываем протухшее,
-  // и только если это не помогло - самую близкую к истечению запись.
+  // The cache on a router must not grow without bound. Expired entries go
+  // first, and only if that did not help, the one closest to expiry.
   if (cache_.size() >= config_.max_cache_entries) {
     const auto now = std::chrono::steady_clock::now();
     for (auto it = cache_.begin(); it != cache_.end();) {
@@ -794,8 +795,9 @@ boost::asio::awaitable<TunnelResolver::Answer> TunnelResolver::Query(
   for (int attempt = 0; attempt < attempts; ++attempt) {
     answer = co_await QueryOverUdp(host, qtype);
     if (answer.truncated) {
-      // Ответ не поместился в датаграмму - добираем его по TCP, как велит
-      // RFC 1035; повторять по UDP смысла нет, придёт то же усечение.
+      // The answer did not fit the datagram - fetch it over TCP as RFC 1035
+      // prescribes; retrying over UDP is pointless, the same truncation
+      // would come back.
       answer = co_await QueryOverTcp(host, qtype);
       break;
     }
@@ -810,7 +812,7 @@ boost::asio::awaitable<TunnelResolver::Answer> TunnelResolver::Query(
 
 namespace {
 
-// Собирает запрос без длины: для TCP она приписывается отдельно.
+// Builds the query without a length prefix: TCP gets one added separately.
 bool BuildQuery(const std::string& host, std::uint16_t qtype,
     std::uint16_t query_id, std::vector<std::uint8_t>* out) {
   out->clear();
@@ -889,7 +891,7 @@ TunnelResolver::Answer TunnelResolver::ParseResponse(const std::uint8_t* data,
       offset += rdlength;
       continue;
     }
-    // Срок жизни набора - по самой недолговечной записи в нём.
+    // The set lives as long as its shortest-lived record.
     min_ttl = (min_ttl == 0) ? ttl : std::min(min_ttl, ttl);
     offset += rdlength;
   }
@@ -1028,10 +1030,11 @@ boost::asio::awaitable<TunnelResolver::Answer> TunnelResolver::QueryOverTcp(
 
   const boost::asio::ip::tcp::endpoint dns_endpoint(dns_addr, 53);
   boost::system::error_code op_ec;
-  // as_tuple, а не redirect_error: ровно тот же инстанс async_connect уже
-  // разворачивается в fptn-protocol-lib, и на x86 линковка падала на
-  // "defined in discarded section" - две копии одного кадра корутины.
-  // Каждое ожидание даёт свой тип variant, поэтому переменные разные.
+  // as_tuple rather than redirect_error: the very same async_connect
+  // instantiation is already expanded in fptn-protocol-lib, and on x86 the
+  // link failed with "defined in discarded section" - two copies of one
+  // coroutine frame. Each await yields its own variant type, hence the
+  // separate variables.
   const auto connect_outcome = co_await(
       socket.async_connect(
           dns_endpoint, boost::asio::as_tuple(boost::asio::use_awaitable)) ||
@@ -1083,7 +1086,7 @@ boost::asio::awaitable<TunnelResolver::Answer> TunnelResolver::QueryOverTcp(
   }
 
   answer = ParseResponse(response.data(), response.size(), query_id, host);
-  // По TCP усечения не бывает - флаг из ответа тут только запутает вызывающего.
+  // TCP never truncates - the flag from the reply would only confuse callers.
   answer.truncated = false;
   co_return answer;
 }

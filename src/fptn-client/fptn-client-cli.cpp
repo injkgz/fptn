@@ -67,12 +67,12 @@ namespace {
 using fptn::utils::speed_estimator::ServerInfo;
 
 #if defined(__linux__) || defined(__APPLE__)
-// Каждая проксируемая сессия держит два дескриптора, и мягкий лимит в 1024,
-// с которым запускают демоны на роутере, кончается за пару часов офисной
-// нагрузки: accept начинает возвращать EMFILE, и прокси перестаёт принимать
-// соединения, оставаясь при этом живым процессом.
-// Возвращает лимит, с которым процесс в итоге остался: от него считается
-// потолок сессий SOCKS.
+// Every proxied session holds two descriptors, and the soft limit of 1024
+// that daemons start with on a router runs out within a couple of hours of
+// office traffic: accept starts returning EMFILE and the proxy stops taking
+// connections while the process itself stays alive.
+// Returns the limit the process ended up with: the SOCKS session cap is
+// derived from it.
 std::size_t RaiseFileDescriptorLimit() {
   struct rlimit limit {};
   if (getrlimit(RLIMIT_NOFILE, &limit) != 0) {
@@ -96,9 +96,10 @@ std::size_t RaiseFileDescriptorLimit() {
 std::size_t RaiseFileDescriptorLimit() { return 0; }
 #endif
 
-// Сессия занимает два дескриптора, плюс запас на туннель, логи и служебные
-// сокеты. Фиксированное число тут врёт: на роутере лимит бывает и 1024, и
-// 4096, и потолок должен считаться от него, а не стоять константой.
+// A session takes two descriptors, plus headroom for the tunnel, the logs
+// and service sockets. A fixed number would lie here: a router may have a
+// limit of 1024 or 4096, and the cap has to follow it rather than be a
+// constant.
 std::size_t DefaultMaxSocksSessions(std::size_t fd_limit) {
   constexpr std::size_t kReserved = 256;
   constexpr std::size_t kFallback = 512;
@@ -111,13 +112,13 @@ std::size_t DefaultMaxSocksSessions(std::size_t fd_limit) {
 
 // Servers of every token in one pool, each carrying the credentials of the
 // token it came from.
-// Конфиг-файлом кормят то, что не влезает в командную строку: длинные ключи и
-// их массивы. Значения разворачиваются в те же флаги, что и раньше, поэтому
-// разбор, типы и умолчания остаются общими. Флаги, заданные в командной
-// строке, идут после и перекрывают файл.
+// A config file carries what does not fit on the command line: long keys and
+// arrays of them. Values expand into the very same flags, so parsing, types
+// and defaults stay shared. Flags given on the command line come afterwards
+// and override the file.
 std::vector<std::string> ExpandConfigFile(int argc, char* argv[]) {
-  // Имена ключей пишут и через дефис, и через подчёркивание; для разбора это
-  // один и тот же флаг.
+  // Keys are written with dashes and with underscores alike; to the parser
+  // they are the same flag.
   const auto normalize = [](std::string name) {
     if (name.starts_with("--")) {
       std::replace(name.begin(), name.end(), '_', '-');
@@ -159,9 +160,9 @@ std::vector<std::string> ExpandConfigFile(int argc, char* argv[]) {
     throw std::runtime_error("Config file must contain a JSON object");
   }
 
-  // Аргументы-переключатели значения не принимают: в JSON они булевы, но в
-  // командной строке разворачиваются в голый флаг, иначе значение улетает в
-  // позиционные и разбор падает.
+  // Switch arguments take no value: in JSON they are booleans, but on the
+  // command line they expand into a bare flag - otherwise the value lands
+  // among the positional arguments and parsing fails.
   static constexpr std::string_view kFlagOnly[] = {"--disable-routing"};
   const auto is_flag_only = [](const std::string& flag) {
     return std::ranges::find(kFlagOnly, flag) != std::end(kFlagOnly);
@@ -202,8 +203,8 @@ std::vector<std::string> ExpandConfigFile(int argc, char* argv[]) {
     if (value.is_null()) {
       continue;
     }
-    // Тот же флаг в командной строке главнее файла. Пропускаем его здесь, а не
-    // полагаемся на порядок: повтор одного аргумента разбор не переживает.
+    // The same flag on the command line wins over the file. It is skipped
+    // here rather than left to ordering: a repeated argument breaks parsing.
     if (from_command_line.contains(flag)) {
       continue;
     }
@@ -214,7 +215,7 @@ std::vector<std::string> ExpandConfigFile(int argc, char* argv[]) {
       continue;
     }
     if (value.is_array()) {
-      // Массив - это повторяющийся флаг: так задаются несколько токенов.
+      // An array is a repeated flag: this is how several tokens are given.
       for (const auto& item : value) {
         append_value(flag, item);
       }
@@ -350,16 +351,17 @@ std::optional<fptn::utils::speed_estimator::LoginResult> SelectServer(
   return last;
 }
 
-// Три замера подряд за пределом - и сторож просит завершиться. Раньше он слал
-// процессу SIGTERM: в многопоточной программе это грубо, очистка пропускалась,
-// а под ZeroBlock, который запускает помощника сам, уход PID вообще теряет его
-// насовсем. Теперь сторож просто останавливает туннель - главный цикл выходит
-// сам, SOCKS и маршруты убираются штатно, procd поднимает процесс заново.
-// (ZeroBlock --max-ping не передаёт, поэтому там сторож не создаётся вовсе.)
-// Плановый обход всего пула. Без него в реестре живёт только один замер -
-// тот, что случился при выборе сервера на старте, - и список серверов
-// показывает давно протухшие числа. Сервер, который лежал при запуске и с тех
-// пор поднялся, иначе никогда не станет снова кандидатом.
+// Three readings in a row past the limit and the watchdog asks to shut down.
+// It used to send the process SIGTERM: crude in a multi-threaded program,
+// cleanup was skipped, and under ZeroBlock - which starts the helper itself -
+// a vanishing PID loses it for good. Now the watchdog simply stops the
+// tunnel: the main loop exits on its own, SOCKS and routes are torn down
+// properly, and procd brings the process back.
+// (ZeroBlock does not pass --max-ping, so no watchdog is created there.)
+// A scheduled sweep over the whole pool. Without it the registry holds a
+// single measurement - the one taken while picking a server at startup - and
+// the server list shows long-stale numbers. A server that was down at launch
+// and has recovered since would otherwise never become a candidate again.
 class PoolMonitor final {
  public:
   PoolMonitor(std::shared_ptr<fptn::client::status::ServerRegistry> registry,
@@ -462,8 +464,8 @@ class LatencyWatchdog final {
       const auto ms = fptn::utils::speed_estimator::GetDownloadTimeMs(
           server_, sni_, 5, server_.md5_fingerprint, censorship_strategy_);
       if (registry_) {
-        // UINT64_MAX означает, что сервер не ответил; в реестре неудача
-        // записывается нулём, как это принято в Clash API.
+        // UINT64_MAX means the server did not answer; in the registry a
+        // failure is stored as zero, as the Clash API does.
         const std::uint32_t delay =
             ms == UINT64_MAX ? 0 : static_cast<std::uint32_t>(ms);
         registry_->RecordProbe(
@@ -504,9 +506,9 @@ class LatencyWatchdog final {
   std::thread thread_;
 };
 
-// Имена sni-spoofing-* остались от прежних версий: на деле они всегда включали
-// Reality-режим. Держим их псевдонимами канонических reality-*, чтобы не ломать
-// чужие конфиги.
+// The sni-spoofing-* names are inherited from earlier versions: in practice
+// they always enabled Reality mode. They are kept as aliases of the canonical
+// reality-* values so that existing configs keep working.
 const std::map<std::string, std::string>& BypassAliases() {
   static const std::map<std::string, std::string> kAliases = {
       {"sni-spoofing-chrome-149", "reality-chrome-149"},
@@ -556,7 +558,7 @@ BypassStrategies() {
   return kStrategies;
 }
 
-// Всё, что принимает --bypass-method: канонические имена плюс псевдонимы.
+// Everything --bypass-method accepts: canonical names plus the aliases.
 const std::set<std::string>& BypassMethodNames() {
   static const std::set<std::string> kNames = [] {
     std::set<std::string> names;
@@ -1064,9 +1066,9 @@ int main(int argc, char* argv[]) {
       SPDLOG_ERROR("--access-token is required");
       return EXIT_FAILURE;
     }
-    // Порт SOCKS открываем до выбора сервера: ZeroBlock ждёт готовности
-    // помощника считаные секунды, а логин-гонка идёт до минуты. Соединения
-    // полежат в backlog ядра, пока не поднимется туннель.
+    // The SOCKS port is opened before a server is picked: ZeroBlock waits
+    // only seconds for the helper, while the login race takes up to a minute.
+    // Connections rest in the kernel backlog until the tunnel comes up.
     fptn::socks::Socks5ServerPtr socks_server;
     if (socks_enabled) {
       socks_server = std::make_unique<fptn::socks::Socks5Server>(
@@ -1084,8 +1086,8 @@ int main(int argc, char* argv[]) {
     fptn::utils::speed_estimator::ServerInfo selected_server;
     std::string pre_obtained_token;
     bool server_pinned = false;
-    // Реестр переживает выбор сервера: пул и замеры нужны всё время работы,
-    // а не только на старте.
+    // The registry outlives server selection: the pool and its measurements
+    // are needed for the whole run, not just at startup.
     auto registry = std::make_shared<fptn::client::status::ServerRegistry>();
     try {
       const auto servers = ExcludeServers(
@@ -1126,16 +1128,16 @@ int main(int argc, char* argv[]) {
       SPDLOG_ERROR("Config error: {}", err.what());
       return EXIT_FAILURE;
     }
-    // Адрес выбранного сервера нужен ещё и менеджеру маршрутов: он исключает
-    // его из туннеля, иначе получился бы туннель в туннеле.
+    // The route manager needs the chosen server address as well: it excludes
+    // it from the tunnel, or the tunnel would run inside itself.
     const auto server_ip = fptn::routing::ResolveDomain(selected_server.host);
     if (server_ip.IsEmpty()) {
       SPDLOG_ERROR("DNS resolve error: {}", selected_server.host);
       return EXIT_FAILURE;
     }
 
-    // Собрать подключение к конкретному серверу. Вынесено отдельно, потому
-    // что то же самое нужно при смене сервера на лету.
+    // Build a connection to a particular server. Factored out because the
+    // same thing is needed when switching servers at runtime.
     using fptn::vpn::http::ClientPtr;
     auto make_client = [&](const ServerInfo& server, const std::string& token,
                            int login_timeout_sec = 10) -> ClientPtr {
@@ -1306,8 +1308,8 @@ int main(int argc, char* argv[]) {
       }
     }
 
-    // Объявлен до статус-API: смена сервера пересоздаёт сторожа, а он должен
-    // мерить уже новый узел.
+    // Declared before the status API: switching servers recreates the
+    // watchdog, and it has to measure the new node.
     std::unique_ptr<LatencyWatchdog> watchdog;
     std::mutex switch_mutex;
 
@@ -1372,9 +1374,9 @@ int main(int argc, char* argv[]) {
       status_server->SetSwitchServer([&](const ServerInfo& server) -> bool {
         const std::scoped_lock<std::mutex> lock(switch_mutex);
 
-        // Менеджер маршрутов исключает из туннеля адрес того сервера, с
-        // которым его подняли, и переписать это исключение на лету нельзя.
-        // Там, где маршрутами владеет другой демон, исключать нечего.
+        // The route manager excludes the address of the server it was
+        // started with, and that exclusion cannot be rewritten in place.
+        // Where another daemon owns the routes there is nothing to exclude.
         if (route_manager) {
           SPDLOG_WARN(
               "Server switching needs --disable-routing: the route manager "
@@ -1387,10 +1389,10 @@ int main(int argc, char* argv[]) {
           return true;  // уже на нём
         }
 
-        // Смена гасит текущую сессию до того, как получится новая: сервер
-        // считает сессии на пользователя и второй вход бы отклонил. Значит
-        // сначала убеждаемся, что новый узел вообще отвечает - иначе
-        // рабочий туннель встал бы на всё время неудачных попыток входа.
+        // A switch drops the current session before a new one exists: the
+        // server counts sessions per user and would refuse a second login.
+        // So make sure the new node answers at all first - otherwise a
+        // working tunnel would stall for the whole run of failed attempts.
         const auto probe = fptn::utils::speed_estimator::GetDownloadTimeMs(
             server, sni, 5, server.md5_fingerprint, censorship_strategy);
         const std::uint32_t probe_ms =
@@ -1415,7 +1417,7 @@ int main(int argc, char* argv[]) {
         SPDLOG_INFO("Switched to {}",
             fptn::client::status::ServerRegistry::DisplayName(server));
 
-        // Сторож следил за прежним узлом - пересобираем его под новый.
+        // The watchdog watched the previous node - rebuild it for the new one.
         if (max_ping > 0) {
           watchdog.reset();
           watchdog = std::make_unique<LatencyWatchdog>(server, sni,

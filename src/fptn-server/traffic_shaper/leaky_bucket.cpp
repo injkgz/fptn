@@ -29,12 +29,11 @@ bool LeakyBucket::CheckSpeedLimit(std::size_t packet_size) noexcept {
       now - last_leak_time_)
                            .count();
 
-  // Ведро протекает пропорционально прошедшему времени. Раньше счётчик
-  // сбрасывался только тогда, когда очередной пакет приходил спустя секунду
-  // после предыдущего сброса: при плотном потоке такой паузы не случается
-  // никогда, счётчик упирался в потолок и дальше отбрасывалось всё подряд -
-  // до первого затишья. Из-за этого скачивание проседало в разы сильнее
-  // отдачи, где паузы бывают часто.
+  // The bucket leaks in proportion to the elapsed time. The counter used to
+  // reset only when a packet arrived a full second after the previous reset:
+  // a dense stream never has such a gap, so the counter hit the ceiling and
+  // everything after it was dropped until the traffic went quiet. That hurt
+  // downloads far more than uploads, where pauses are common.
   if (elapsed > 0) {
     const auto leaked = static_cast<std::size_t>(
         (static_cast<std::uint64_t>(max_bytes_per_second_) *

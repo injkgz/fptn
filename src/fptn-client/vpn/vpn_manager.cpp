@@ -135,10 +135,10 @@ bool VpnManager::Start() {
 }
 
 bool VpnManager::IsClientStarted() const {
-  // Клиент можно подменить на лету, поэтому указатель читаем под мьютексом.
-  // Именно полным, а не try_lock: под try_lock занятый мьютекс (а его держит
-  // отправка пакетов) выглядел бы как "клиент не запущен", и супервизор
-  // затевал бы полный рестарт туннеля на ровном месте.
+  // The client can be swapped at runtime, so the pointer is read under the
+  // mutex - a full lock rather than try_lock. Under try_lock a busy mutex
+  // (packet sending holds it) looked like "the client is not running", and
+  // the supervisor started a full tunnel restart for no reason.
   const std::lock_guard<std::mutex> lock(mutex_);
   return config_.http_client && config_.http_client->IsStarted();
 }
@@ -154,8 +154,8 @@ bool VpnManager::SwitchClient(
     return false;
   }
 
-  // Флаг снимает панику главного цикла: пока идёт смена, туннель формально
-  // не подключён, но это не обрыв.
+  // The flag keeps the main loop calm: while the switch is running the
+  // tunnel is formally disconnected, but this is not a drop.
   switching_ = true;
 
   const std::unique_lock<std::mutex> lock(mutex_);  // mutex
@@ -167,8 +167,8 @@ bool VpnManager::SwitchClient(
 
   SPDLOG_INFO("Switching the tunnel to another server");
 
-  // Сессию отпускаем до логина: сервер может считать сессии на пользователя,
-  // и вход со второго места он бы отклонил.
+  // Release the session before logging in: the server may count sessions per
+  // user and would refuse a second concurrent login.
   auto previous = std::move(config_.http_client);
   previous->Stop();
 
@@ -187,10 +187,10 @@ bool VpnManager::SwitchClient(
       &VpnManager::HandleOnPacketsFromWebSocket, this, std::placeholders::_1));
   config_.http_client->Start();
 
-  // ever_connected_ не трогаем: это признак "туннель хоть раз поднимался", и
-  // смена сервера его не отменяет. Сбросить его здесь означало бы, что
-  // IsStarted() на время переключения отвечает "нет" - главный цикл принимает
-  // это за обрыв и завершает процесс.
+  // Leave ever_connected_ alone: it means "the tunnel came up at least once",
+  // and switching servers does not undo that. Clearing it here would make
+  // IsStarted() answer "no" for the duration of the switch - the main loop
+  // reads that as a drop and ends the process.
   reconnecting_ = false;
   reconnect_attempt_ = 0;
 

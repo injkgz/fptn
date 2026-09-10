@@ -45,23 +45,23 @@ class VpnManager final {
   bool Start();
   bool Stop();
 
-  // Заменить сервер, не поднимая туннель заново: TUN уже открыт, маршруты
-  // применены, меняется только та сторона, к которой мы подключены. Раньше
-  // сменой сервера был выход из процесса - procd поднимал клиент снова, и он
-  // приходил на тот же самый сервер.
+  // Swap the server without bringing the tunnel up again: the TUN device is
+  // already open and the routes are applied, only the far end changes.
+  // Switching used to mean leaving the process - procd started the client
+  // again, and it came back on the very same server.
   //
-  // Принимает фабрику, а не готовое соединение: логин на новый сервер должен
-  // произойти уже после того, как отпущена текущая сессия. Иначе сервер с
-  // лимитом сессий на пользователя откажет во входе. Если фабрика вернула
-  // пустое соединение, прежнее поднимается обратно.
+  // Takes a factory rather than a ready connection: the login to the new
+  // server has to happen after the current session is released, otherwise a
+  // server that counts sessions per user refuses it. If the factory returns
+  // nothing, the previous connection is brought back up.
   bool SwitchClient(
       const std::function<fptn::vpn::http::ClientPtr()>& make_client);
   std::size_t GetSendRate();
   std::size_t GetReceiveRate();
   bool IsStarted();
 
-  // Счётчики пакетов велись с самого начала, но геттеров у них не было -
-  // данные копились и никем не читались.
+  // The packet counters were always maintained, but had no getters - the
+  // numbers piled up and nobody could read them.
   std::uint64_t ToServerSent() const noexcept { return to_server_sent_.load(); }
   std::uint64_t ToServerDropped() const noexcept {
     return to_server_dropped_.load();
@@ -93,8 +93,8 @@ class VpnManager final {
   std::atomic<bool> ever_connected_;
   std::atomic<bool> gave_up_;
   std::atomic<bool> reconnecting_;
-  // Идёт смена сервера: соединения в этот момент нет, но обрывом это считать
-  // нельзя - иначе главный цикл завершит процесс.
+  // A server switch is in progress: there is no connection at this moment,
+  // but it must not count as a drop - the main loop would end the process.
   std::atomic<bool> switching_{false};
   std::atomic<int> reconnect_attempt_;
 

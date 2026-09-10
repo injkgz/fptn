@@ -215,10 +215,10 @@ void WebsocketClient::DoStop() {
       auto& tcp = boost::beast::get_lowest_layer(ws_);
 
       if (tcp.socket().is_open()) {
-        // Только на живом сокете и только неброшенной перегрузкой: на уже
-        // закрытом set_option кидает Bad file descriptor, а вместе с ним
-        // улетал весь блок - shutdown и close не выполнялись вовсе, и
-        // дескриптор оставался висеть до конца жизни процесса.
+        // Only on a live socket, and only through the non-throwing
+        // overload: on a closed one set_option raises Bad file descriptor,
+        // which used to take the whole block with it - shutdown and close
+        // never ran, and the descriptor leaked for the life of the process.
         const boost::asio::socket_base::linger linger(true, 0);
         tcp.socket().set_option(linger, ec);
         if (ec) {

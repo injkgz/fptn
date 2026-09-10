@@ -39,8 +39,9 @@ constexpr std::uint8_t kRepSuccess = 0x00;
 constexpr std::uint8_t kRepGeneralFailure = 0x01;
 constexpr std::uint8_t kRepCommandNotSupported = 0x07;
 
-// Эхо на localhost: цель для CONNECT, чтобы не ходить наружу. Приём
-// асинхронный - закрывать блокирующий accept из чужого потока ненадёжно.
+// An echo server on localhost: a CONNECT target that keeps the test off the
+// network. Accepting is asynchronous - closing a blocking accept from another
+// thread is not reliable.
 class EchoServer {
  public:
   EchoServer() : acceptor_(ioc_, tcp::endpoint(tcp::v4(), 0)) {
@@ -114,8 +115,8 @@ class EchoServer {
   std::uint16_t port_ = 0;
 };
 
-// Свободный порт занимаем и сразу отпускаем: гонка возможна, но на одной
-// машине с тестом за него конкурировать некому.
+// Claim a free port and release it at once: a race is possible, but on the
+// machine running the test nothing else competes for it.
 std::uint16_t PickFreePort() {
   boost::asio::io_context ioc;
   tcp::acceptor probe(ioc, tcp::endpoint(tcp::v4(), 0));
@@ -132,7 +133,7 @@ class Socks5Client {
 
   bool connected() const { return !ec_; }
 
-  // Возвращает второй байт ответа на приветствие (выбранный метод).
+  // Returns the second byte of the greeting reply (the chosen method).
   std::uint8_t Greet(std::uint8_t method) {
     const std::array<std::uint8_t, 3> hello{kVersion, 1, method};
     boost::asio::write(socket_, boost::asio::buffer(hello), ec_);
@@ -144,7 +145,7 @@ class Socks5Client {
     return ec_ ? kAuthUnacceptable : reply[1];
   }
 
-  // Возвращает код ответа (REP) на запрос.
+  // Returns the reply code (REP) for the request.
   std::uint8_t Request(
       std::uint8_t command, std::uint16_t port, std::uint8_t last_octet = 1) {
     const std::array<std::uint8_t, 10> request{kVersion, command, 0x00,
@@ -170,7 +171,7 @@ class Socks5Client {
     return ec_ ? std::string{} : std::string(buffer.begin(), buffer.end());
   }
 
-  // Ждёт, пока сервер закроет соединение; false - не дождались.
+  // Waits for the server to close the connection; false if it did not.
   bool WaitClosed(std::chrono::milliseconds limit) {  // NOLINT
     const auto deadline = std::chrono::steady_clock::now() + limit;
     std::array<char, 64> buffer{};
@@ -196,7 +197,7 @@ Socks5Server::Config MakeConfig(std::uint16_t port) {
   Socks5Server::Config config;
   config.listen_address = "127.0.0.1";
   config.listen_port = port;
-  // Ни привязки к TUN, ни резолвера через тоннель: цель задаётся адресом.
+  // No TUN binding and no tunnel resolver: the target is given by address.
   config.tun_address_ipv4.clear();
   config.tun_address_ipv6.clear();
   config.dns_server_ipv4 = "127.0.0.1";
@@ -264,8 +265,8 @@ TEST(Socks5ServerTest, RefusesSessionsOverTheLimit) {
   ASSERT_EQ(first.Greet(kAuthNone), kAuthNone);
   ASSERT_EQ(first.Request(kCmdConnect, echo.port()), kRepSuccess);
 
-  // Счётчик увеличивается в момент запуска сессии, поэтому второму клиенту
-  // даём дойти до сервера уже за потолком.
+  // The counter grows when a session starts, so the second client is let
+  // reach the server once the cap is already in place.
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
   Socks5Client second(ioc, port);
@@ -273,7 +274,7 @@ TEST(Socks5ServerTest, RefusesSessionsOverTheLimit) {
   EXPECT_EQ(second.Greet(kAuthNone), kAuthNone);
   EXPECT_EQ(second.Request(kCmdConnect, echo.port()), kRepGeneralFailure);
 
-  // Первая сессия при этом продолжает работать.
+  // The first session keeps working meanwhile.
   EXPECT_EQ(first.RoundTrip("still alive"), "still alive");
 
   server.Stop();

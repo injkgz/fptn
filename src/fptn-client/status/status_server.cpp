@@ -145,7 +145,7 @@ void StatusServer::AcceptLoop() {
       if (!running_) {
         return;
       }
-      // Единичная ошибка приёма не повод ронять весь эндпоинт.
+      // A single accept error is no reason to bring the endpoint down.
       continue;
     }
     try {
@@ -226,14 +226,14 @@ StatusServer::Reply StatusServer::HandleDelay(
     if (ec != std::errc() || ptr != raw.data() + raw.size() || parsed <= 0) {
       return Reply{400, nlohmann::json{{"message", "Body invalid"}}};
     }
-    // В Clash API это поле разбирается как int16, и timeout=60000 молча даёт
-    // 400. Здесь просто ограничиваем сверху.
+    // In the Clash API this field is parsed as int16, so timeout=60000
+    // silently returns 400. Here it is simply clamped.
     timeout_ms = std::min(parsed, kMaxDelayTimeoutMs);
   }
 
   const auto delay = delay_probe_(*server, timeout_ms);
-  // Замер по запросу тоже попадает в окно: иначе ручная проверка ничего не
-  // оставляет после себя, и следующий читатель видит устаревшее число.
+  // An on-demand probe lands in the window as well: otherwise a manual check
+  // leaves nothing behind and the next reader sees a stale number.
   registry_->RecordProbe(
       *server, delay, delay == 0 ? "delay probe failed" : "");
   if (delay == 0) {
@@ -246,7 +246,7 @@ StatusServer::Reply StatusServer::HandleDelay(
 StatusServer::Reply StatusServer::HandleSwitch(
     const std::string& name, const std::string& body) const {
   std::string wanted = name;
-  // Clash кладёт имя в тело: PUT /proxies/<группа> {"name": "<узел>"}.
+  // Clash puts the name in the body: PUT /proxies/<group> {"name": "<node>"}.
   if (!body.empty()) {
     try {
       const auto parsed = nlohmann::json::parse(body);
@@ -270,8 +270,8 @@ StatusServer::Reply StatusServer::HandleSwitch(
     return Reply{
         503, nlohmann::json{{"message", "Server switch was refused"}}};
   }
-  // Clash отвечает на переключение 204, но пустой ответ в этом API - редкость,
-  // и клиенту полезнее увидеть, куда именно он переключился.
+  // Clash answers a switch with 204, but an empty body is unusual in this
+  // API, and the caller benefits from seeing where it actually switched.
   return Reply{
       200, nlohmann::json{{"now", ServerRegistry::DisplayName(*server)}}};
 }

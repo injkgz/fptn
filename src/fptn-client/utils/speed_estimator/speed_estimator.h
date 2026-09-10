@@ -23,15 +23,16 @@ struct LoginResult {
   std::string access_token;
 };
 
-// Результат одной пробы: сколько заняла и почему не удалась. Раньше замеры
-// жили только внутри гонки и выбрасывались - наружу не выходило ни одного
-// числа, поэтому ни список серверов, ни их задержки показать было нечем.
+// The outcome of a single probe: how long it took and why it failed. The
+// measurements used to live inside the race and were discarded, so not a
+// single number reached the outside - neither the server list nor its
+// latency could be shown.
 using ProbeCallback = std::function<void(const ServerInfo& server,
     std::uint32_t delay_ms,
     const std::string& error)>;
 
-// Сколько серверов опрашиваем одновременно. Раньше на каждый сервер
-// заводился отдельный поток; на роутере с большим пулом это заметно.
+// How many servers are probed at once. Every server used to get its own
+// thread, which is noticeable on a router with a large pool.
 constexpr std::size_t kMaxProbeConcurrency = 8;
 
 std::uint64_t GetDownloadTimeMs(const ServerInfo& server,

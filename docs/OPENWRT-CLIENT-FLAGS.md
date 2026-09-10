@@ -1,20 +1,21 @@
-# fptn-client-cli на OpenWrt — все флаги
+# fptn-client-cli on OpenWrt — every flag
 
-Клиент из ветки `feature/openwrt-socks-zeroblock` (PR #370). Помимо обычного
-режима VPN он умеет **жить рядом с прозрачным прокси** — не трогать маршруты и
-отдавать трафик через SOCKS5. Именно так его запускает ZeroBlock.
+Besides the ordinary VPN mode this client can **live next to a transparent
+proxy**: leave the routes alone and hand traffic out over SOCKS5. That is
+exactly how ZeroBlock runs it.
 
-Версия: 0.4.7. Сборки — в релизе `openwrt-socks-pr370`.
+Русская версия — [OPENWRT-CLIENT-FLAGS.ru.md](OPENWRT-CLIENT-FLAGS.ru.md).
 
-## Быстрый старт
+## Quick start
 
-Обычный VPN (клиент сам ставит маршруты и правит DNS):
+A plain VPN (the client sets up routes and DNS itself):
 
 ```sh
 fptn-client-cli --access-token fptn://…
 ```
 
-Сосуществование с ZeroBlock (маршруты и DNS чужие, наружу — SOCKS5):
+Coexisting with ZeroBlock (routes and DNS belong to someone else, SOCKS5 is the
+way out):
 
 ```sh
 fptn-client-cli \
@@ -26,11 +27,10 @@ fptn-client-cli \
   --routing-mark 0x40000000
 ```
 
-## Конфиг-файлом вместо флагов
+## A config file instead of flags
 
-Ключи вроде `fptnb:` длиной под полтора килобайта в командную строку не
-помещаются, а нескольких таких там тем более не будет. Поэтому всё то же самое
-задаётся файлом:
+Keys such as `fptnb:` run to a kilobyte and a half and do not fit on a command
+line, let alone several of them. So the same settings can come from a file:
 
 ```sh
 fptn-client-cli -c /etc/fptn/zeroblock.json
@@ -50,99 +50,100 @@ fptn-client-cli -c /etc/fptn/zeroblock.json
 }
 ```
 
-Правила простые:
+The rules are simple:
 
-- ключ — имя флага без `--`; дефисы и подчёркивания равнозначны
-  (`tun_interface_ip` = `tun-interface-ip`), причём и в командной строке тоже:
-  `--socks_listen` понимается наравне с `--socks-listen`;
-- массив разворачивается в повторяющийся флаг — так задаются несколько токенов;
-- `null` пропускается;
-- **флаг, заданный в командной строке, перекрывает файл** — из файла он тогда
-  просто не берётся. Это касается и массивов: свои `--access-token` в командной
-  строке отменяют список из файла целиком, а не дополняют его.
+- a key is a flag name without `--`; dashes and underscores are equivalent
+  (`tun_interface_ip` = `tun-interface-ip`), on the command line as well:
+  `--socks_listen` is understood the same as `--socks-listen`;
+- an array expands into a repeated flag — this is how several tokens are given;
+- `null` is skipped;
+- **a flag given on the command line overrides the file** — it is then simply
+  not taken from there. This includes arrays: your own `--access-token`
+  arguments replace the file's list entirely rather than adding to it.
 
-Отдельно про `disable_routing`: в командной строке это переключатель без
-значения, поэтому из файла он разворачивается в голый флаг, когда значение
-истинно, и не добавляется вовсе, когда ложно. Истинным считается `true`,
-строка `"true"`, `"1"`, `"yes"`, `"on"` и любое ненулевое число — так что
-`"disable_routing": true` и `"disable-routing": "true"` работают одинаково.
+A note on `disable_routing`: on the command line it is a switch with no value,
+so from a file it expands into a bare flag when the value is true and is not
+added at all when false. True means `true`, the string `"true"`, `"1"`, `"yes"`,
+`"on"` and any non-zero number, so `"disable_routing": true` and
+`"disable-routing": "true"` behave the same.
 
-## Токены и выбор сервера
+## Tokens and server selection
 
-| флаг | по умолчанию | что делает |
+| flag | default | what it does |
 |---|---|---|
-| `--access-token` | — | Токен доступа (`fptn://` или сжатый `fptnb:`). **Обязателен.** Флаг повторяемый: несколько токенов дают один общий пул серверов |
-| `--preferred-server` | — | Имя сервера, к которому подключаться без гонки. Регистр не важен. При совпадении имён в разных токенах уточняется как `Сервис/Имя` |
-| `--exclude-servers` | — | Регулярка: серверы с подходящим именем в пул не попадают, например `Russia\|Vietnam`. Проверяется и голое имя, и `Сервис/Имя` — так выбрасывается целый сервис |
-| `--max-ping` | `0` (без предела) | Предел задержки в миллисекундах. Сервер сверх предела не выбирается, а действующий заменяется, если держится над пределом |
+| `--access-token` | — | Access token (`fptn://` or the compressed `fptnb:`). **Required.** The flag repeats: several tokens form one shared server pool |
+| `--preferred-server` | — | Name of the server to connect to without a race. Case-insensitive. When names collide between tokens, qualify it as `Service/Name` |
+| `--exclude-servers` | — | Regular expression: servers whose name matches are left out of the pool, e.g. `Russia\|Vietnam`. Both the bare name and `Service/Name` are tested, so a whole service can be dropped |
+| `--max-ping` | `0` (no limit) | Latency limit in milliseconds. A server above it is not picked, and the one in use is replaced if it stays above |
 
-Несколько токенов — это **не** несколько туннелей. Клиент сливает их серверы в
-один список, приписывая каждому его учётку, и работает через один выбранный
-сервер. Второй токен нужен, когда на сервере лимит «одна активная сессия на
-пользователя»: он даёт запасные серверы под другой учёткой.
+Several tokens are **not** several tunnels. The client merges their servers into
+one list, tagging each with its own account, and works through a single chosen
+server. A second token helps when the server allows one active session per user:
+it provides spare servers under a different account.
 
-Как выбирается сервер:
+How a server is chosen:
 
-1. если задан `--preferred-server` — берётся он;
-2. иначе идёт **гонка логинов** (10 серверов параллельно), выигрывает
-   ответивший первым;
-3. при заданном `--max-ping` победителя дополнительно замеряют; не уложился —
-   выбывает из списка, и гонка повторяется. Три круга, потом берётся лучший из
-   оставшихся.
+1. if `--preferred-server` is set, it is used;
+2. otherwise a **login race** runs (up to 8 servers in flight), and the first
+   to answer wins;
+3. with `--max-ping` set, the winner is measured as well; if it does not fit,
+   it leaves the list and the race repeats. Three rounds, then the best of the
+   remaining ones is taken.
 
-Дальше сторож раз в минуту меряет задержку. Три превышения подряд — туннель
-гасится, процесс завершается штатно, и служба поднимает его заново уже с другим
-сервером. Сторож создаётся только при `--max-ping > 0` и только если сервер не
-закреплён по имени.
+After that a watchdog measures the latency once a minute. Three readings in a
+row past the limit and the tunnel is brought down, the process exits cleanly,
+and the service starts it again on a different server. The watchdog is created
+only when `--max-ping > 0` and only if the server is not pinned by name.
 
-## Сосуществование с прозрачным прокси
+## Coexisting with a transparent proxy
 
-| флаг | по умолчанию | что делает |
+| flag | default | what it does |
 |---|---|---|
-| `--socks-listen` | — | Поднять SOCKS5 (CONNECT и UDP ASSOCIATE) на этом адресе, например `127.0.0.2:20180`. Подразумевает `--disable-routing` |
-| `--disable-routing` | выкл. | Не трогать системные маршруты: интерфейс поднимается, маршрут по умолчанию остаётся чужим |
-| `--socks-route-table` | `1080` | Номер таблицы маршрутизации для трафика SOCKS |
-| `--socks-max-sessions` | по лимиту дескрипторов | Потолок одновременных SOCKS-сессий. По умолчанию считается из `RLIMIT_NOFILE` процесса: два дескриптора на сессию плюс запас, при лимите 4096 это 1920 |
-| `--routing-mark` | — | `SO_MARK` (hex или десятичное) на всех исходящих сокетах, чтобы правила файрвола исключали трафик клиента из DPI-обхода и прозрачного проксирования, например `0x40000000` |
+| `--socks-listen` | — | Run SOCKS5 (CONNECT and UDP ASSOCIATE) on this address, e.g. `127.0.0.2:20180`. Implies `--disable-routing` |
+| `--disable-routing` | off | Do not touch the system routes: the interface comes up, the default route stays someone else's |
+| `--socks-route-table` | `1080` | Routing table id used for SOCKS traffic |
+| `--socks-max-sessions` | from the descriptor limit | Cap on simultaneous SOCKS sessions. By default derived from the process `RLIMIT_NOFILE`: two descriptors per session plus headroom, which is 1920 at a limit of 4096 |
+| `--routing-mark` | — | `SO_MARK` (hex or decimal) on every outgoing socket, so firewall rules can keep the client's traffic out of DPI bypass and transparent proxying, e.g. `0x40000000` |
 
-Порт открывается **сразу при старте**, до гонки логинов: соединения ждут в
-backlog ядра, пока поднимается туннель. Это важно для ZeroBlock, который ждёт
-готовности помощника считаные секунды, тогда как перебор нескольких десятков
-серверов занимает до минуты.
+The port opens **immediately at startup**, before the login race: connections
+wait in the kernel backlog while the tunnel comes up. This matters for
+ZeroBlock, which waits only seconds for the helper to become ready, while
+working through several dozen servers takes up to a minute.
 
-В этом режиме клиент не владеет ни маршрутами, ни резолвером: `/etc/resolv.conf`
-и dnsmasq не трогаются, таблицу маршрутов держит тот, кто её создал.
+In this mode the client owns neither routes nor the resolver: `/etc/resolv.conf`
+and dnsmasq are left alone, and the routing table belongs to whoever created it.
 
-## Статус наружу: список серверов и задержки
+## Exposing status: the server pool and its latency
 
-| флаг | по умолчанию | что делает |
+| flag | default | what it does |
 |---|---|---|
-| `--status-listen` | — | Поднять локальный HTTP со списком серверов и их задержками, например `127.0.0.1:9091` |
-| `--status-secret` | — | Токен: запросы должны нести `Authorization: Bearer <токен>`. Пустой — без проверки |
-| `--probe-interval` | `0` | Перемерять весь пул раз в N секунд. `0` — не перемерять |
+| `--status-listen` | — | Serve a local HTTP API with the server list and their latency, e.g. `127.0.0.1:9091` |
+| `--status-secret` | — | Token: requests must carry `Authorization: Bearer <token>`. Empty means no check |
+| `--probe-interval` | `0` | Re-measure the whole pool every N seconds. `0` disables it |
 
-Клиент знает, какие серверы есть в токенах и сколько до них идти, но раньше не
-показывал этого никому: наружу выходили только строки в логе и код возврата
-процесса. Прозрачному прокси, который держит клиент помощником, взять эти
-данные было неоткуда — отсюда и требование «покажи, что у тебя внутри».
+The client knows which servers a token carries and how long each takes to
+answer, but used to show that to nobody: the only output was log lines and the
+process exit code. A transparent proxy running the client as its helper had
+nowhere to read this from — hence the request to "show what you have inside".
 
-Формат ответов повторяет Clash API, потому что его уже умеют читать и панели
-(yacd, metacubexd), и обвязки на роутерах:
+The response shape follows the Clash API, because dashboards (yacd,
+metacubexd) and router-side tooling already parse it:
 
-| запрос | что отдаёт |
+| request | what it returns |
 |---|---|
-| `GET /proxies` | Все серверы: `type`, `name`, `udp`, `history` с последним замером, плюс группа-селектор `FPTN` с `now` и `all` |
-| `GET /proxies/<имя>` | Один сервер в том же виде |
-| `GET /proxies/<имя>/delay?timeout=8000` | Мерит **сейчас** и отдаёт `{"delay": <мс>}`. Результат тоже попадает в окно замеров |
-| `PUT /proxies/<имя>` | Переключить туннель на другой сервер, тело `{"name": "<имя>"}`. В ответ `{"now": "<имя>"}` |
-| `GET /status` | Подробный вид: окно замеров по каждому серверу, состояние туннеля, счётчики пакетов, сессии SOCKS |
-| `GET /version` | Версия клиента |
+| `GET /proxies` | Every server: `type`, `name`, `udp`, `history` with the latest measurement, plus the selector group `FPTN` with `now` and `all` |
+| `GET /proxies/<name>` | One server in the same shape |
+| `GET /proxies/<name>/delay?timeout=8000` | Measures **now** and returns `{"delay": <ms>}`. The result also lands in the measurement window |
+| `PUT /proxies/<name>` | Switch the tunnel to another server, body `{"name": "<name>"}`. Answers `{"now": "<name>"}` |
+| `GET /status` | The detailed view: the measurement window per server, tunnel state, packet counters, SOCKS sessions |
+| `GET /version` | Client version |
 
-Задержка — это время логина на сервер: лёгкий запрос, поэтому число отражает
-канал, а не ширину полосы. Ноль означает неудачу — так же, как в Clash API.
-Хранится окно из десяти последних замеров, в `/status` по нему считаются
-среднее, минимум, максимум и число неудач. Одна неудачная проба посреди окна
-сервер не вычёркивает: живым считается тот, у кого удалась **последняя**.
+The latency is the login time: a small request, so the number describes the
+link rather than the bandwidth. Zero means failure, as in the Clash API. A
+window of the last ten measurements is kept, and `/status` reports its average,
+minimum, maximum and failure count. One failed probe in the middle of the
+window does not strike a server out: alive means its **latest** probe
+succeeded.
 
 ```console
 $ curl -s -H 'Authorization: Bearer secret' 127.0.0.1:9091/proxies
@@ -155,124 +156,124 @@ $ curl -s -H 'Authorization: Bearer secret' 127.0.0.1:9091/proxies
                   "history":[{"time":"2026-09-10T11:27:52.101Z","delay":0}]}}}
 ```
 
-Без `--probe-interval` в окне остаётся только то, что измерилось при выборе
-сервера на старте, плюс проверки текущего узла от `--max-ping`. То есть сервер,
-который лежал при запуске и с тех пор поднялся, так и будет числиться мёртвым.
-Разумное значение для роутера — от нескольких минут: каждая проба скачивает
-тестовый файл, и частый обход большого пула греет процессор без пользы.
+Without `--probe-interval` the window holds only what was measured while
+picking a server at startup, plus the checks of the current node from
+`--max-ping`. That is, a server that was down at launch and has recovered since
+will keep counting as dead. A sensible value on a router is minutes rather than
+seconds: every probe downloads a test file, and sweeping a large pool often
+heats the CPU for nothing.
 
-### Смена сервера на лету
+### Switching servers at runtime
 
-`PUT /proxies/<имя>` переводит туннель на другой сервер, не перезапуская
-процесс. TUN остаётся открытым, SOCKS продолжает принимать соединения, меняется
-только та сторона, к которой мы подключены; адрес, который выдаёт сервер, идёт
-в подстановку source-IP исходящих пакетов, поэтому интерфейс переподнимать не
-нужно.
+`PUT /proxies/<name>` moves the tunnel to another server without restarting the
+process. The TUN device stays open, SOCKS keeps accepting connections, and only
+the far end changes; the address the server assigns is used to rewrite the
+source IP of outgoing packets, so the interface does not need to come up again.
 
-Порядок такой: сначала новый сервер пробуется отдельным замером, и только если
-он ответил — текущая сессия отпускается и начинается вход на новый. Так сделано
-потому, что сервер может считать сессии на пользователя и второй одновременный
-вход отклонить: держать оба соединения разом нельзя, а гасить рабочее ради
-узла, который не отвечает, — тем более. Если вход всё-таки не удался, поднимается
-прежний сервер, и запрос возвращает `503`.
+The order is deliberate: the new server is probed first, and only if it answered
+is the current session released and the login started. This is because the
+server may count sessions per user and refuse a second concurrent login: both
+connections cannot be held at once, and dropping a working one for a node that
+does not answer would be worse still. If the login fails anyway, the previous
+server is brought back up and the request returns `503`.
 
-Смена занимает около секунды и на это время трафика в туннеле нет.
+A switch takes about a second, and there is no traffic in the tunnel during it.
 
-**Переключение требует `--disable-routing`** (то есть и `--socks-listen`). Когда
-маршрутами владеет сам клиент, менеджер маршрутов исключает из туннеля адрес
-того сервера, с которым его подняли, — иначе получился бы туннель в туннеле, — а
-переписать это исключение на лету нельзя. Попытка сменить сервер в таком режиме
-вернёт `503` и запись в логе. На роутере это ничего не стоит: там маршрутами
-распоряжается прозрачный прокси, а клиент работает помощником.
+**Switching requires `--disable-routing`** (and therefore `--socks-listen`).
+When the client owns the routes, the route manager excludes the address of the
+server it was started with — otherwise the tunnel would run inside itself — and
+that exclusion cannot be rewritten in place. An attempt to switch in that mode
+returns `503` and a log line. On a router this costs nothing: the transparent
+proxy owns the routes there and the client runs as its helper.
 
-**Слушать только петлю.** `--status-listen 0.0.0.0:9091` откроет список серверов
-всей локальной сети; токен это не отменяет. У Xray metrics-сервера, с которого
-берут данные обвязки для LuCI, аутентификации нет вовсе, и вешают его как раз на
-`0.0.0.0` — повторять это не стоит.
+**Listen on the loopback only.** `--status-listen 0.0.0.0:9091` exposes the
+server list to the whole local network, and a token does not change that. The
+Xray metrics server that LuCI packages read has no authentication at all and is
+bound to `0.0.0.0` — not an example worth following.
 
-## Сеть и туннель
+## Network and tunnel
 
-| флаг | по умолчанию | что делает |
+| flag | default | what it does |
 |---|---|---|
-| `--tun-interface-name` | `tun0` | Имя интерфейса |
-| `--tun-interface-ip` | `10.0.0.1` | IPv4-адрес интерфейса |
-| `--tun-interface-ipv6` | `fd00::1` | IPv6-адрес интерфейса |
+| `--tun-interface-name` | `tun0` | Interface name |
+| `--tun-interface-ip` | `10.0.0.1` | Interface IPv4 address |
+| `--tun-interface-ipv6` | `fd00::1` | Interface IPv6 address |
 | `--mtu-size` | `1420` | MTU |
-| `--out-network-interface` | автоопределение | Исходящий интерфейс |
-| `--gateway-ip` | автоопределение | IPv4 шлюза по умолчанию |
-| `--gateway-ipv6` | автоопределение | IPv6 шлюза по умолчанию |
-| `--exclude-tunnel-networks` | `10.0.0.0/8,192.168.0.0/16` | Сети мимо туннеля, всегда напрямую. CIDR через запятую |
-| `--include-tunnel-networks` | — | Сети всегда через туннель |
+| `--out-network-interface` | auto-detected | Outgoing interface |
+| `--gateway-ip` | auto-detected | Default IPv4 gateway |
+| `--gateway-ipv6` | auto-detected | Default IPv6 gateway |
+| `--exclude-tunnel-networks` | `10.0.0.0/8,192.168.0.0/16` | Networks that bypass the tunnel, always direct. CIDR, comma-separated |
+| `--include-tunnel-networks` | — | Networks that always go through the tunnel |
 
-## Обход блокировок
+## Censorship bypass
 
-| флаг | по умолчанию | что делает |
+| flag | default | what it does |
 |---|---|---|
-| `--sni` | `google.com` | Домен в SNI при TLS-рукопожатии |
-| `--bypass-method` | `sni-spoofing-yandex-26-4` | Способ маскировки, см. ниже |
-| `--connection-strategy` | `rolling-tunnel` | `rolling-tunnel` — один туннель, обновляемый каждые 10 минут; `dual-rolling-tunnel` и `triple-rolling-tunnel` — два и три параллельно |
+| `--sni` | `google.com` | Domain used as SNI in the TLS handshake |
+| `--bypass-method` | `sni-spoofing-yandex-26-4` | Masking method, see below |
+| `--connection-strategy` | `rolling-tunnel` | `rolling-tunnel` — one tunnel renewed every 10 minutes; `dual-rolling-tunnel` and `triple-rolling-tunnel` — two and three in parallel |
 
-Значения `--bypass-method`:
+Values for `--bypass-method`:
 
-| значение | что делает |
+| value | what it does |
 |---|---|
-| `sni` | Простая подмена SNI, без Reality |
-| `obfuscation` | Обфускация TLS |
-| `reality` | Reality без профиля браузера — **сервер может его отвергнуть**, см. ниже |
-| `reality-chrome-145` … `-149` | Reality с рукопожатием Chrome нужной версии |
-| `reality-firefox-149` … `-151` | То же для Firefox |
-| `reality-yandex-24`, `-25`, `-26-3`, `-26-4` | Для Яндекс.Браузера |
-| `reality-safari-26-4`, `-26-5` | Для Safari |
+| `sni` | Plain SNI spoofing, no Reality |
+| `obfuscation` | TLS obfuscation |
+| `reality` | Reality without a browser profile — **a server may refuse it**, see below |
+| `reality-chrome-145` … `-149` | Reality with a Chrome handshake of that version |
+| `reality-firefox-149` … `-151` | The same for Firefox |
+| `reality-yandex-24`, `-25`, `-26-3`, `-26-4` | For Yandex Browser |
+| `reality-safari-26-4`, `-26-5` | For Safari |
 
-Прежние имена `sni-spoofing-*` остались псевдонимами: `sni-spoofing-chrome-149`
-и `reality-chrome-149` — одно и то же. Название вводило в заблуждение — эти
-режимы всегда включали Reality, а не «просто подмену SNI»; отдельно взятая
-подмена теперь доступна как `sni`. Старые конфиги менять не нужно.
+The former `sni-spoofing-*` names remain as aliases: `sni-spoofing-chrome-149`
+and `reality-chrome-149` are the same thing. The name was misleading — those
+modes always enabled Reality rather than "plain SNI spoofing"; spoofing on its
+own is now available as `sni`. Existing configs need no changes.
 
-Неизвестное значение клиент отвергает на старте, перечисляя допустимые:
+An unknown value is rejected at startup with the accepted ones listed:
 `Invalid bypass method 'reality-chrome-150'. Choose from: …`.
 
-Проверка всех значений на роутере (OpenWrt 24.10, aarch64) против рабочего
-сервера: туннель поднимается за ~2 с на `sni`, `obfuscation` и на всех
-четырнадцати версионных `reality-*` (и на их псевдонимах `sni-spoofing-*`).
-Единственное исключение — `reality` без версии браузера: поддельное
-рукопожатие проходит, но настоящее рвётся с
-`handshake: stream truncated [asio.ssl.stream:1]` (пять попыток из пяти).
-Похоже, серверу нужен профиль конкретного браузера, поэтому в бою берите
-версионный вариант.
+Every value was checked on a router (OpenWrt 24.10, aarch64) against a live
+server: the tunnel comes up in about 2 s on `sni`, `obfuscation` and all
+fourteen versioned `reality-*` values (and on their `sni-spoofing-*` aliases).
+The one exception is `reality` without a browser version: the fake handshake
+completes, but the real one fails with
+`handshake: stream truncated [asio.ssl.stream:1]` (five attempts out of five).
+The server appears to need a specific browser profile, so use a versioned value
+in production.
 
-У `sni` своя особенность: маскировки рукопожатия там нет, и под активным DPI
-он может отваливаться уже после успешного логина — соединение проходит
-авторизацию (`Status: 200`), а websocket-туннель закрывается по таймауту
-рукопожатия. На спокойном канале работает стабильно.
+`sni` has a quirk of its own: there is no handshake masking, so under active
+DPI it can fall over after a successful login — the connection passes
+authentication (`Status: 200`) while the websocket tunnel closes on a handshake
+timeout. On a quiet link it works reliably.
 
-## Фильтрация и раздельное туннелирование
+## Filtering and split tunnelling
 
-| флаг | по умолчанию | что делает |
+| flag | default | what it does |
 |---|---|---|
-| `--blacklist-domains` | `solovev-live.ru,ria.ru,tass.ru,1tv.ru,ntv.ru,rt.com,lenta.ru` | Полностью закрыть домен и все его поддомены |
-| `--enable-split-tunnel` | `false` | Включить раздельное туннелирование |
-| `--split-tunnel-mode` | `exclude` | `exclude` — перечисленные домены мимо туннеля, остальное через него; `include` — наоборот |
-| `--split-tunnel-domains` | `ru,su,рф,xn--p1ai,vk.com,yandex.com,userapi.com,yandex.net,clstorage.net` | Список доменов для режима выше. Пустое значение — встроенный список |
+| `--blacklist-domains` | `solovev-live.ru,ria.ru,tass.ru,1tv.ru,ntv.ru,rt.com,lenta.ru` | Block a domain and all of its subdomains outright |
+| `--enable-split-tunnel` | `false` | Enable split tunnelling |
+| `--split-tunnel-mode` | `exclude` | `exclude` — the listed domains bypass the tunnel and everything else goes through it; `include` — the other way round |
+| `--split-tunnel-domains` | `ru,su,рф,xn--p1ai,vk.com,yandex.com,userapi.com,yandex.net,clstorage.net` | Domain list for the mode above. An empty value uses the built-in list |
 
-Блокировки рекламы на OpenWrt нет: `--enable-ad-block` собирается только в
-десктопных сборках (`#ifndef FPTN_OPENWRT`), и передавать его сюда нельзя —
-разбор упадёт с `Unknown argument`. Списки для роутера держит прозрачный прокси
-перед клиентом.
+There is no ad blocking on OpenWrt: `--enable-ad-block` is compiled into
+desktop builds only (`#ifndef FPTN_OPENWRT`), and passing it here is not
+possible — parsing fails with `Unknown argument`. On a router the lists belong
+to the transparent proxy in front of the client.
 
-## Служебное
+## Housekeeping
 
-| флаг | что делает |
+| flag | what it does |
 |---|---|
-| `-c`, `--config` | Путь к JSON-конфигу (см. выше) |
-| `-h`, `--help` | Справка |
-| `-v`, `--version` | Версия |
+| `-c`, `--config` | Path to the JSON config (see above) |
+| `-h`, `--help` | Help |
+| `-v`, `--version` | Version |
 
-## Служба на роутере
+## The service on a router
 
-Пакет ставит `/etc/init.d/fptn` и UCI-конфиг `/etc/config/fptn`. Имена опций
-совпадают с флагами (подчёркивания вместо дефисов), токенов может быть
-несколько:
+The package installs `/etc/init.d/fptn` and the UCI config `/etc/config/fptn`.
+Option names match the flags (underscores instead of dashes), and there can be
+several tokens:
 
 ```
 config fptn 'config'
@@ -285,32 +286,34 @@ config fptn 'config'
 	option routing_mark '0x40000000'
 ```
 
-Одиночный `option access_token` из прежних версий тоже понимается.
+A single `option access_token` from earlier versions is understood as well.
 
-Когда клиента запускает ZeroBlock, эта служба не используется: демон поднимает
-`/usr/bin/fptn-client-cli` сам и передаёт параметры аргументами.
+When ZeroBlock runs the client, this service is not used: the daemon starts
+`/usr/bin/fptn-client-cli` itself and passes the parameters as arguments.
 
-## Что стоит знать про поведение на роутере
+## Behaviour on a router worth knowing about
 
-**Лог.** На OpenWrt пишется в два файла по мегабайту с ротацией — раньше это
-были три по двенадцать, и на tmpfs такой лог съедал память роутера.
+**Logging.** On OpenWrt it goes to two files of one megabyte with rotation —
+it used to be three of twelve, and on tmpfs such a log ate the router's memory.
 
-**Дескрипторы.** При старте поднимается мягкий лимит до жёсткого, и от него же
-считается потолок одновременных сессий — при лимите 4096 это 1920. За потолком
-клиент получает честный отказ по протоколу, простаивающие сессии закрываются по
-таймауту (5 минут), а при нехватке дескрипторов приём соединений притормаживается
-с растущей паузой вместо холостого цикла. В логе видно, с чем клиент стартовал:
+**Descriptors.** At startup the soft limit is raised to the hard one, and the
+cap on simultaneous sessions is derived from it — 1920 at a limit of 4096. Past
+the cap the client answers with an honest protocol-level refusal, idle sessions
+are closed on a timeout (5 minutes), and when descriptors run short, accepting
+connections is slowed with a growing pause instead of spinning. The log shows
+what the client started with:
 
 ```
 SOCKS5 session limit: 1920 (fd limit 4096)
 ```
 
-**Сколько это в памяти.** На активную сессию идут два буфера релея по 16 КБ.
-Пятьсот сессий — около 16 МБ, полный потолок в 1920 дал бы 61 МБ. На роутере со
-скромной памятью потолок стоит держать не как цель, а как предохранитель: если
-упираетесь в него постоянно, дешевле уменьшить буфер, чем поднимать лимит.
+**What that costs in memory.** An active session uses two relay buffers of
+16 KB. Five hundred sessions come to about 16 MB, and the full cap of 1920
+would be 61 MB. On a router with modest memory the cap is a fuse rather than a
+target: if you hit it constantly, shrinking the buffer is cheaper than raising
+the limit.
 
-**Резолвер.** Имена резолвятся внутри туннеля, ответы кэшируются по их TTL
-(от 10 секунд до 10 минут, до 512 записей). Потерянный запрос переспрашивается
-второй раз, усечённый ответ добирается по TCP. Про молчащий DNS в лог идёт одна
-строка на переход состояния, а не на каждое соединение.
+**The resolver.** Names are resolved inside the tunnel and answers are cached
+for their TTL (from 10 seconds to 10 minutes, up to 512 entries). A lost query
+is asked once more, and a truncated answer is fetched over TCP. A silent DNS
+produces one log line per state change rather than one per connection.

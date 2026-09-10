@@ -172,8 +172,9 @@ void UdpAssociate::Close() {
 boost::asio::awaitable<void> UdpAssociate::Run() {
   std::vector<std::uint8_t> buffer(kBufferSize);
   boost::system::error_code ec;
-  // Уборка по часам, а не на каждой датаграмме: на активном QUIC обход всех
-  // сессий в горячем пути стоил заметно дороже самой пересылки.
+  // Cleanup on a clock rather than on every datagram: with busy QUIC,
+  // walking every session on the hot path cost noticeably more than the
+  // forwarding itself.
   auto next_sweep = std::chrono::steady_clock::now() + config_.sweep_interval;
 
   for (;;) {
@@ -242,8 +243,8 @@ boost::asio::awaitable<void> UdpAssociate::HandleDatagram(
   if (ec) {
     SPDLOG_DEBUG("SOCKS5[{}]: UDP send to {}:{} failed: {}", session_id_,
         target.address().to_string(), target.port(), ec.message());
-    // Сокет, на котором отправка уже не проходит, дальше не пригодится:
-    // держать его до истечения таймаута - значит держать дескриптор впустую.
+    // A socket that can no longer send is of no further use: keeping it until
+    // the timeout expires means holding a descriptor for nothing.
     Drop(key);
   }
 }
@@ -253,8 +254,8 @@ UdpAssociate::Session* UdpAssociate::FindOrCreate(const Key& key,
     boost::system::error_code& ec) {
   const auto known = sessions_.find(key);
   if (known == sessions_.end() && sessions_.size() >= config_.max_sessions) {
-    // Сначала убираем то, что уже простаивает: обычно этого хватает, и отказ
-    // достаётся только по-настоящему активному всплеску.
+    // Drop what is already idle first: that is usually enough, and only a
+    // genuinely busy burst ends up refused.
     SweepIdle();
     if (sessions_.size() >= config_.max_sessions) {
       SPDLOG_WARN("UDP[{}]: session limit {} reached, dropping datagram",

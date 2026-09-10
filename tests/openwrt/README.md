@@ -1,28 +1,30 @@
-# Проверка клиента на роутере
+# Checking the client on a router
 
-Два скрипта, которые гоняются прямо на OpenWrt — они проверяют то, что
-юнит-тестами не поймать: разбор аргументов собранного бинаря и живой туннель.
+Two scripts that run straight on OpenWrt. They cover what unit tests cannot:
+argument parsing of the built binary and a live tunnel.
 
 ```sh
-scp fptn-client-cli root@router:/tmp/fc     # или cat | ssh, если dropbear
+scp fptn-client-cli root@router:/tmp/fc     # or cat | ssh with dropbear
 cat cases-parse.sh | ssh root@router 'cat > /tmp/cases-parse.sh'
-ssh root@router 'sh /tmp/cases-parse.sh "<токен>"'
-ssh root@router 'sh /tmp/cases-live.sh  "<токен>"'
+ssh root@router 'sh /tmp/cases-parse.sh "<token>"'
+ssh root@router 'sh /tmp/cases-live.sh  "<token>"'
 ```
 
-`cases-parse.sh` — разбор аргументов, подключение не нужно: конфиг с
-подчёркиваниями и с дефисами, булев переключатель в трёх видах, `null`,
-числа, массив токенов, перекрытие файла командной строкой (в том числе через
-подчёркивание), длинная и короткая форма `--config`, работа вообще без файла,
-плюс внятность ошибок на битом JSON, на массиве вместо объекта и на
-отсутствующем файле.
+`cases-parse.sh` — argument parsing, no connection needed: a config written
+with underscores and with dashes, a boolean switch in three spellings, `null`,
+numbers, an array of tokens, the command line overriding the file (including
+through an underscored key), the long and short form of `--config`, running
+with no file at all, plus how clear the errors are on broken JSON, on an array
+instead of an object, and on a missing file.
 
-`cases-live.sh` — реальный туннель: подъём, TCP через SOCKS, резолв имени
-внутри туннеля (`--socks5-hostname`), закрепление сервера по имени, пустой пул
-после `exclude_servers`, недостижимый `max_ping`, неизвестный `bypass_method`.
-Маршруты роутера при этом не трогаются — клиент запускается с
-`disable_routing` и своим портом.
+`cases-live.sh` — a real tunnel: bringing it up, TCP through SOCKS, resolving a
+name inside the tunnel (`--socks5-hostname`), pinning a server by name, an
+empty pool after `exclude_servers`, an unreachable `max_ping`, an unknown
+`bypass_method`. Router routes are left alone: the client runs with
+`disable_routing` and its own port.
 
-Токен для прогона нужен свой: на сервере лимит «одна активная сессия на
-пользователя», поэтому учётку боевого роутера брать нельзя — тест отберёт у
-него связь.
+Use a token of your own for the run: the server allows one active session per
+user, so the account of a production router cannot be used — the test would
+take its connectivity away.
+
+Русская версия — [README.ru.md](README.ru.md).

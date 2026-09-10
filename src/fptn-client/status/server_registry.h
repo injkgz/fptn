@@ -22,10 +22,10 @@ namespace fptn::client::status {
 
 using fptn::utils::speed_estimator::ServerInfo;
 
-// Сколько последних замеров держим на сервер. Одного числа мало: проба
-// периодически врёт (сеть моргнула, узел занят), и решение по одному
-// измерению уводит пул с живого сервера. Окно позволяет отдавать среднее
-// и число неудач вместо мгновенного значения.
+// How many recent measurements are kept per server. A single number is not
+// enough: a probe lies now and then (the network blinked, the node was busy),
+// and a decision made on one measurement moves the pool off a healthy server.
+// A window allows reporting an average and a failure count instead.
 constexpr std::size_t kMeasurementWindow = 10;
 
 struct Measurement {
@@ -43,20 +43,20 @@ struct ServerStats {
   bool alive = false;
 };
 
-// Пул серверов вместе с результатами замеров. До этого пул жил локальной
-// переменной в main() и умирал сразу после выбора сервера, а измеренные
-// задержки выбрасывались - наружу не выходило ни одного числа.
+// The server pool together with its measurements. The pool used to live in a
+// local inside main() and died right after a server was picked, while the
+// measured latency was discarded - not a single number reached the outside.
 class ServerRegistry final {
  public:
   ServerRegistry() = default;
   ServerRegistry(const ServerRegistry&) = delete;
   ServerRegistry& operator=(const ServerRegistry&) = delete;
 
-  // Задаёт состав пула. Замеры по серверам, которые остались в списке,
-  // сохраняются - пересборка пула не должна стирать историю.
+  // Sets the pool contents. Measurements for servers that stay on the list
+  // are preserved - rebuilding the pool must not wipe the history.
   void Reset(const std::vector<ServerInfo>& servers);
 
-  // Результат одной пробы. delay_ms == 0 считается неудачей.
+  // The result of one probe. delay_ms == 0 counts as a failure.
   void RecordProbe(const ServerInfo& server,
       std::uint32_t delay_ms,
       const std::string& error = {});
@@ -71,15 +71,15 @@ class ServerRegistry final {
       const;
   [[nodiscard]] ServerStats Stats(const ServerInfo& server) const;
 
-  // Совместимый с Clash API вид: его уже умеют читать и панели (yacd,
-  // metacubexd), и прозрачные прокси, которые ходят к sing-box.
+  // The Clash API compatible view: dashboards (yacd, metacubexd) and the
+  // transparent proxies that talk to sing-box already read it.
   [[nodiscard]] nlohmann::json ToClashProxies() const;
 
-  // Свой, подробный вид: окно замеров, ошибки, состав пула.
+  // The detailed native view: measurement window, errors, pool contents.
   [[nodiscard]] nlohmann::json ToJson() const;
 
-  // Ключ сервера в API - host:port, он уникален в пуле. Имя сервера
-  // уникальным не обязано быть: разные токены приносят одинаковые имена.
+  // The server key in the API is host:port, unique within the pool. Names
+  // need not be unique: different tokens bring identical ones.
   [[nodiscard]] static std::string KeyOf(const ServerInfo& server);
   [[nodiscard]] static std::string DisplayName(const ServerInfo& server);
 
@@ -97,7 +97,7 @@ class ServerRegistry final {
 
   mutable std::mutex mutex_;
   std::unordered_map<std::string, Entry> entries_;
-  // порядок из токенов, чтобы вывод был стабильным между запросами
+  // token order, so the output stays stable between requests
   std::vector<std::string> order_;
   std::string active_key_;
 };

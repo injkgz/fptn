@@ -92,9 +92,9 @@ class CommonUserManager final {
     return false;
   }
 
-  // Возвращает биты в секунду. int здесь переполнялся: лимит 10000 МБ/с
-  // давал 10 485 760 000, что не влезает в 32 бита, и наружу уходило
-  // 1 895 825 408 - в пять с лишним раз меньше заданного.
+  // Returns bits per second. int overflowed here: a 10000 MB/s limit came to
+  // 10,485,760,000, which does not fit in 32 bits, so the value handed out was
+  // 1,895,825,408 - over five times lower than configured.
   std::int64_t GetUserBandwidthBit(const std::string& username) const {
     const std::scoped_lock lock(mutex_);  // mutex
 

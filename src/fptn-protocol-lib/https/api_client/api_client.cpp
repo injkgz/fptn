@@ -1053,7 +1053,7 @@ bool ApiClient::TestHandshakeImpl(int timeout) const {
     SPDLOG_WARN("Handshake failed for server {} (IP: {}): {}", host_copy,
         server_ip_copy, error_msg);
   } catch (const std::exception& e) {
-    // Создаем копии строк перед использованием в логгере
+    // Copy the strings before handing them to the logger
     std::string host_copy = host_;
     std::string server_ip_copy = server_ip;
     std::string error_msg;
@@ -1067,7 +1067,7 @@ bool ApiClient::TestHandshakeImpl(int timeout) const {
     SPDLOG_WARN("Handshake failed for server {} (IP: {}): {}", host_copy,
         server_ip_copy, error_msg);
   } catch (...) {
-    // Создаем копии строк перед использованием в логгере
+    // Copy the strings before handing them to the logger
     std::string host_copy = host_;
     std::string server_ip_copy = server_ip;
 
