@@ -39,7 +39,8 @@ var callServiceList = rpc.declare({
 function serviceInfo() {
 	return callServiceList('fptn').then(function (res) {
 		try {
-			var instance = res['fptn']['instances']['instance1'];
+			var instance = res['fptn']['instances']['fptn'] ||
+			                res['fptn']['instances']['instance1'];
 			return { running: instance['running'] === true, pid: instance['pid'] };
 		} catch (e) {
 			return { running: false };
@@ -170,6 +171,10 @@ function compareVersions(left, right) {
 }
 
 function checkUpdate() {
+	// Checking from the admin's browser leaks the request outside and hangs
+	// where GitHub is blocked; the router itself knows better when to look.
+	if (!uci.get('fptn', 'config', 'check_updates'))
+		return Promise.resolve(null);
 	return fetch('https://api.github.com/repos/fptn-project/fptn/releases/latest')
 		.then(function (res) {
 			return res.json();
@@ -388,17 +393,6 @@ function showDiagnostics() {
 	});
 }
 
-function reconcile(running) {
-	var enabled = uci.get('fptn', 'config', 'enabled') === '1';
-
-	if (enabled === running)
-		return Promise.resolve();
-
-	return fs.exec('/etc/init.d/fptn', [ enabled ? 'restart' : 'stop' ])
-		.catch(function (err) {
-			ui.addNotification(null, E('p', 'fptn: ' + err), 'error');
-		});
-}
 
 function splitRuns(log) {
 	var runs = [], current = '';
@@ -577,7 +571,9 @@ return view.extend({
 		var running = data[0].running;
 		var state = describe(running, data[1]);
 
-		reconcile(running);
+		// Opening a page must not touch the daemon: procd already restarts it
+		// on a config change through its reload trigger. This used to restart
+		// or stop the tunnel just because someone looked at the tab.
 		poll.add(refresh, 5);
 
 		m = new form.Map('fptn', 'FPTN VPN', 'Censorship-resistant VPN');
@@ -730,6 +726,36 @@ return view.extend({
 		spoofingMethods.forEach(function (method) {
 			o.depends('bypass_method', method[0]);
 		});
+		o.rmempty = true;
+
+		o = s.taboption('routing', form.Value, 'socks_max_sessions',
+			'SOCKS session limit',
+			'Cap on simultaneous SOCKS sessions. Empty derives it from the file descriptor limit: two per session plus headroom.');
+		o.datatype = 'uinteger';
+		o.placeholder = 'auto';
+		o.depends({ socks_listen: /.+/ });
+		o.rmempty = true;
+
+		o = s.taboption('general', form.Value, 'status_listen',
+			'Status API address',
+			'Serve a local HTTP API with the server pool and their latency, for example 127.0.0.1:9091. Keep it on the loopback: on 0.0.0.0 the server list is readable from the whole network.');
+		o.datatype = 'ipaddrport';
+		o.placeholder = '127.0.0.1:9091';
+		o.rmempty = true;
+
+		o = s.taboption('general', form.Value, 'status_secret',
+			'Status API token',
+			'Requests must carry Authorization: Bearer <token>. Empty means no check.');
+		o.password = true;
+		o.depends({ status_listen: /.+/ });
+		o.rmempty = true;
+
+		o = s.taboption('general', form.Value, 'probe_interval',
+			'Re-measure interval',
+			'Re-measure every server in the pool every N seconds. 0 keeps only the reading taken at startup, so a server that was down at launch stays marked dead.');
+		o.datatype = 'uinteger';
+		o.placeholder = '0';
+		o.depends({ status_listen: /.+/ });
 		o.rmempty = true;
 
 		o = s.taboption('routing', form.Flag, 'use_fptn_dns', 'Use FPTN DNS',

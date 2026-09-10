@@ -381,6 +381,11 @@ std::optional<fptn::utils::speed_estimator::LoginResult> SelectServer(
 // tunnel: the main loop exits on its own, SOCKS and routes are torn down
 // properly, and procd brings the process back.
 // (ZeroBlock does not pass --max-ping, so no watchdog is created there.)
+// How many times the startup login race is retried before giving up, and how
+// long to wait between attempts.
+constexpr int kStartupLoginAttempts = 3;
+constexpr std::chrono::seconds kStartupRetryDelay{5};
+
 // A scheduled sweep over the whole pool. Without it the registry holds a
 // single measurement - the one taken while picking a server at startup - and
 // the server list shows long-stale numbers. A server that was down at launch
@@ -1178,8 +1183,25 @@ int main(int argc, char* argv[]) {
         }
       }
       if (use_login_race) {
-        auto login_result = SelectServer(
-            servers, sni, censorship_strategy, max_ping, registry);
+        // The whole pool being unreachable is usually a moment, not a state:
+        // the uplink is still coming up, or the DNS has not settled. Leaving
+        // here means the process is gone, and a supervising daemon does not
+        // start it again - the router then sits without a proxy until someone
+        // restarts it by hand. So the pool is retried a few times first.
+        std::optional<fptn::utils::speed_estimator::LoginResult> login_result;
+        for (int attempt = 1; attempt <= kStartupLoginAttempts; ++attempt) {
+          login_result =
+              SelectServer(servers, sni, censorship_strategy, max_ping,
+                  registry);
+          if (login_result) {
+            break;
+          }
+          if (attempt < kStartupLoginAttempts) {
+            SPDLOG_WARN("No server answered (attempt {}/{}), retrying in {}s",
+                attempt, kStartupLoginAttempts, kStartupRetryDelay.count());
+            std::this_thread::sleep_for(kStartupRetryDelay);
+          }
+        }
         if (!login_result) {
           SPDLOG_ERROR("All servers unavailable!");
           return EXIT_FAILURE;
