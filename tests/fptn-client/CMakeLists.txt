@@ -48,3 +48,11 @@ target_include_directories(DomainBlacklistMatchTest PRIVATE "${FPTN_CLIENT_DIR}"
 target_link_libraries(
   DomainBlacklistMatchTest PRIVATE ${LIBS} Boost::locale re2::re2)
 add_test(NAME DomainBlacklistMatchTest COMMAND DomainBlacklistMatchTest)
+
+# --- Server registry test ---
+add_executable(ServerRegistryTest
+  status/ServerRegistryTest.cpp
+  "${FPTN_CLIENT_DIR}/status/server_registry.cpp")
+target_include_directories(ServerRegistryTest PRIVATE "${FPTN_CLIENT_DIR}")
+target_link_libraries(ServerRegistryTest PRIVATE ${LIBS} Threads::Threads)
+add_test(NAME ServerRegistryTest COMMAND ServerRegistryTest)

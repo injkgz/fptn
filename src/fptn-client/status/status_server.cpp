@@ -13,6 +13,9 @@ Distributed under the MIT License (https://opensource.org/licenses/MIT)
 #include <utility>
 #include <vector>
 
+#include <boost/asio/co_spawn.hpp>    // NOLINT(build/include_order)
+#include <boost/asio/detached.hpp>    // NOLINT(build/include_order)
+#include <boost/asio/use_awaitable.hpp>  // NOLINT(build/include_order)
 #include <boost/beast/core.hpp>       // NOLINT(build/include_order)
 #include <boost/beast/http.hpp>       // NOLINT(build/include_order)
 #include <fmt/format.h>               // NOLINT(build/include_order)
@@ -80,14 +83,17 @@ StatusServer::StatusServer(
 StatusServer::~StatusServer() { Stop(); }
 
 void StatusServer::SetDelayProbe(DelayProbe probe) {
+  const std::lock_guard<std::mutex> lock(callbacks_mutex_);
   delay_probe_ = std::move(probe);
 }
 
 void StatusServer::SetSwitchServer(SwitchServer handler) {
+  const std::lock_guard<std::mutex> lock(callbacks_mutex_);
   switch_server_ = std::move(handler);
 }
 
 void StatusServer::SetStatusProvider(StatusProvider provider) {
+  const std::lock_guard<std::mutex> lock(callbacks_mutex_);
   status_provider_ = std::move(provider);
 }
 
@@ -113,7 +119,11 @@ bool StatusServer::Start() {
   }
 
   running_ = true;
-  thread_ = std::thread([this] { AcceptLoop(); });
+  boost::asio::co_spawn(ioc_, AcceptLoop(), boost::asio::detached);
+  threads_.reserve(kThreads);
+  for (int i = 0; i < kThreads; ++i) {
+    threads_.emplace_back([this] { ioc_.run(); });
+  }
 
   SPDLOG_INFO("Status API is listening on {}:{}{}", options_.listen_address,
       options_.listen_port,
@@ -125,35 +135,43 @@ void StatusServer::Stop() {
   if (!running_.exchange(false)) {
     return;
   }
-  boost::system::error_code ec;
-  if (acceptor_) {
-    acceptor_->close(ec);
-  }
+  // The acceptor is closed from inside the context: closing a descriptor that
+  // a blocking accept() sits on does not wake it on Linux, which used to hang
+  // the whole shutdown - and with it the route cleanup that follows.
+  boost::asio::post(ioc_, [this] {
+    boost::system::error_code ec;
+    if (acceptor_) {
+      acceptor_->close(ec);
+    }
+  });
   ioc_.stop();
-  if (thread_.joinable()) {
-    thread_.join();
+  for (auto& thread : threads_) {
+    if (thread.joinable()) {
+      thread.join();
+    }
   }
+  threads_.clear();
   acceptor_.reset();
 }
 
-void StatusServer::AcceptLoop() {
+boost::asio::awaitable<void> StatusServer::AcceptLoop() {
   while (running_) {
     boost::system::error_code ec;
-    tcp::socket socket(ioc_);
-    acceptor_->accept(socket, ec);
+    auto socket = co_await acceptor_->async_accept(
+        boost::asio::redirect_error(boost::asio::use_awaitable, ec));
     if (ec) {
       if (!running_) {
-        return;
+        co_return;
       }
       // A single accept error is no reason to bring the endpoint down.
       continue;
     }
-    try {
-      HandleConnection(std::move(socket));
-    } catch (const std::exception& ex) {
-      SPDLOG_DEBUG("Status API: request failed - {}", ex.what());
-    }
+    // Each request gets its own coroutine: a slow one must not hold up the
+    // rest of the API.
+    boost::asio::co_spawn(
+        ioc_, HandleConnection(std::move(socket)), boost::asio::detached);
   }
+  co_return;
 }
 
 bool StatusServer::Authorized(const std::string& header) const {
@@ -167,8 +185,12 @@ bool StatusServer::Authorized(const std::string& header) const {
   return header.substr(kPrefix.size()) == options_.secret;
 }
 
-void StatusServer::HandleConnection(tcp::socket socket) {
+boost::asio::awaitable<void> StatusServer::HandleConnection(
+    tcp::socket socket) {
   beast::tcp_stream stream(std::move(socket));
+  // The deadline only applies to asynchronous operations, which is why the
+  // reads and writes below are async: a client that connects and says nothing
+  // used to hold the endpoint forever.
   stream.expires_after(std::chrono::seconds(15));
 
   beast::flat_buffer buffer;
@@ -176,9 +198,10 @@ void StatusServer::HandleConnection(tcp::socket socket) {
   parser.body_limit(kMaxRequestBody);
 
   boost::system::error_code ec;
-  http::read(stream, buffer, parser, ec);
+  co_await http::async_read(stream, buffer, parser,
+      boost::asio::redirect_error(boost::asio::use_awaitable, ec));
   if (ec) {
-    return;
+    co_return;
   }
   const auto request = parser.release();
 
@@ -203,8 +226,10 @@ void StatusServer::HandleConnection(tcp::socket socket) {
     response.body().clear();
   }
   response.prepare_payload();
-  http::write(stream, response, ec);
+  co_await http::async_write(stream, response,
+      boost::asio::redirect_error(boost::asio::use_awaitable, ec));
   stream.socket().shutdown(tcp::socket::shutdown_send, ec);
+  co_return;
 }
 
 StatusServer::Reply StatusServer::HandleDelay(
@@ -213,7 +238,12 @@ StatusServer::Reply StatusServer::HandleDelay(
   if (!server) {
     return Reply{404, nlohmann::json{{"message", "Resource not found"}}};
   }
-  if (!delay_probe_) {
+  DelayProbe probe;
+  {
+    const std::lock_guard<std::mutex> lock(callbacks_mutex_);
+    probe = delay_probe_;
+  }
+  if (!probe) {
     return Reply{
         503, nlohmann::json{{"message", "Delay probe is not available"}}};
   }
@@ -231,7 +261,7 @@ StatusServer::Reply StatusServer::HandleDelay(
     timeout_ms = std::min(parsed, kMaxDelayTimeoutMs);
   }
 
-  const auto delay = delay_probe_(*server, timeout_ms);
+  const auto delay = probe(*server, timeout_ms);
   // An on-demand probe lands in the window as well: otherwise a manual check
   // leaves nothing behind and the next reader sees a stale number.
   registry_->RecordProbe(
@@ -262,11 +292,16 @@ StatusServer::Reply StatusServer::HandleSwitch(
   if (!server) {
     return Reply{404, nlohmann::json{{"message", "Resource not found"}}};
   }
-  if (!switch_server_) {
+  SwitchServer handler;
+  {
+    const std::lock_guard<std::mutex> lock(callbacks_mutex_);
+    handler = switch_server_;
+  }
+  if (!handler) {
     return Reply{
         503, nlohmann::json{{"message", "Switching is not available"}}};
   }
-  if (!switch_server_(*server)) {
+  if (!handler(*server)) {
     return Reply{
         503, nlohmann::json{{"message", "Server switch was refused"}}};
   }
@@ -297,8 +332,13 @@ StatusServer::Reply StatusServer::Route(const std::string& method,
 
   if (method == "GET" && path == "/status") {
     auto payload = registry_->ToJson();
-    if (status_provider_) {
-      payload.update(status_provider_());
+    StatusProvider provider;
+    {
+      const std::lock_guard<std::mutex> lock(callbacks_mutex_);
+      provider = status_provider_;
+    }
+    if (provider) {
+      payload.update(provider());
     }
     return Reply{200, std::move(payload)};
   }

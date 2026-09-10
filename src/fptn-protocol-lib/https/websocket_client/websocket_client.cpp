@@ -356,14 +356,31 @@ boost::asio::awaitable<bool> WebsocketClient::Connect() {
     // to be applied before the SYN leaves, and a range connect reopens the
     // socket per attempt, which would drop it.
     if (fptn::protocol::https::GetRoutingMark() != 0) {
-      auto& socket = boost::beast::get_lowest_layer(ws_).socket();
-      const auto endpoint = results.begin()->endpoint();
-      socket.open(endpoint.protocol(), ec);
-      if (!ec) {
+      // Endpoints are walked by hand so the mark lands before every SYN, and
+      // every address is tried: a host with both A and AAAA records must keep
+      // its fallback. A socket that could not be opened is not connected
+      // unmarked - the tunnel traffic would then be routed back into the
+      // tunnel.
+      ec = boost::asio::error::host_not_found;
+      for (const auto& entry : results) {
+        auto& socket = boost::beast::get_lowest_layer(ws_).socket();
+        boost::system::error_code open_ec;
+        socket.open(entry.endpoint().protocol(), open_ec);
+        if (open_ec) {
+          SPDLOG_ERROR("Cannot open a marked socket for {}: {}",
+              config_.common.server_ip.ToString(), open_ec.message());
+          ec = open_ec;
+          break;
+        }
         fptn::protocol::https::ApplyRoutingMark(socket.native_handle());
+        co_await boost::beast::get_lowest_layer(ws_).async_connect(entry.endpoint(),
+            boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+        if (!ec) {
+          break;
+        }
+        boost::system::error_code close_ec;
+        socket.close(close_ec);
       }
-      co_await boost::beast::get_lowest_layer(ws_).async_connect(
-          endpoint, boost::asio::redirect_error(boost::asio::use_awaitable, ec));
     } else {
       co_await boost::beast::get_lowest_layer(ws_).async_connect(
           results, boost::asio::redirect_error(boost::asio::use_awaitable, ec));

@@ -20,6 +20,7 @@ Distributed under the MIT License (https://opensource.org/licenses/MIT)
 #include <cstdint>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -102,12 +103,20 @@ std::size_t RaiseFileDescriptorLimit() { return 0; }
 // constant.
 std::size_t DefaultMaxSocksSessions(std::size_t fd_limit) {
   constexpr std::size_t kReserved = 256;
-  constexpr std::size_t kFallback = 512;
+  constexpr std::size_t kConservative = 128;
+  constexpr std::size_t kCeiling = 4096;
   constexpr std::size_t kMinimum = 64;
-  if (fd_limit <= kReserved) {
-    return kFallback;
+  // An unknown limit (getrlimit failed, or the platform has none) must not
+  // hand out the largest cap - that is exactly the case where the process
+  // knows least. An unlimited one must not remove the ceiling either: with
+  // RLIM_INFINITY the arithmetic below would allow billions of sessions.
+  if (fd_limit == 0 || fd_limit == std::numeric_limits<std::size_t>::max()) {
+    return kConservative;
   }
-  return std::max(kMinimum, (fd_limit - kReserved) / 2);
+  if (fd_limit <= kReserved) {
+    return std::max(kMinimum, fd_limit / 4);
+  }
+  return std::clamp((fd_limit - kReserved) / 2, kMinimum, kCeiling);
 }
 
 // Servers of every token in one pool, each carrying the credentials of the
@@ -138,8 +147,22 @@ std::vector<std::string> ExpandConfigFile(int argc, char* argv[]) {
       config_path = argv[++i];
       continue;
     }
+    // argparse also accepts --config=/path, and so must this: otherwise the
+    // file is quietly ignored and the client dies on a missing token.
+    if (arg.starts_with("--config=")) {
+      config_path = arg.substr(std::string_view("--config=").size());
+      continue;
+    }
+    if (arg.starts_with("-c=")) {
+      config_path = arg.substr(std::string_view("-c=").size());
+      continue;
+    }
     if (arg.starts_with("--")) {
-      from_command_line.insert(arg);
+      // Both spellings register the flag: --sni value and --sni=value must
+      // suppress the same key from the file, or argparse sees it twice.
+      const auto eq = arg.find('=');
+      from_command_line.insert(
+          eq == std::string::npos ? arg : arg.substr(0, eq));
     }
     rest.push_back(arg);
   }
@@ -1089,6 +1112,47 @@ int main(int argc, char* argv[]) {
     // The registry outlives server selection: the pool and its measurements
     // are needed for the whole run, not just at startup.
     auto registry = std::make_shared<fptn::client::status::ServerRegistry>();
+
+    // The status endpoint comes up before the login race, for the same reason
+    // the SOCKS port does: a supervising daemon polls it within seconds, while
+    // working through a large pool takes up to a minute. Until a server is
+    // chosen the pool reads as empty - which is still an answer, unlike a
+    // refused connection.
+    std::unique_ptr<fptn::client::status::StatusServer> status_server;
+    if (!status_listen.empty()) {
+      const auto colon = status_listen.rfind(':');
+      if (colon == std::string::npos) {
+        SPDLOG_ERROR(
+            "Invalid --status-listen value '{}', expected <address>:<port>",
+            status_listen);
+        return EXIT_FAILURE;
+      }
+      fptn::client::status::StatusServer::Options options;
+      options.listen_address = status_listen.substr(0, colon);
+      options.secret = status_secret;
+      try {
+        options.listen_port = static_cast<std::uint16_t>(
+            std::stoi(status_listen.substr(colon + 1)));
+      } catch (const std::exception&) {
+        SPDLOG_ERROR("Invalid port in --status-listen '{}'", status_listen);
+        return EXIT_FAILURE;
+      }
+      status_server = std::make_unique<fptn::client::status::StatusServer>(
+          options, registry);
+      status_server->SetDelayProbe([sni, censorship_strategy](
+                                       const ServerInfo& server,
+                                       int timeout_ms) -> std::uint32_t {
+        const int timeout_sec = std::max(1, timeout_ms / 1000);
+        const auto ms = fptn::utils::speed_estimator::GetDownloadTimeMs(server,
+            sni, timeout_sec, server.md5_fingerprint, censorship_strategy);
+        return ms == UINT64_MAX ? 0 : static_cast<std::uint32_t>(ms);
+      });
+      if (!status_server->Start()) {
+        SPDLOG_ERROR("Failed to start the status API");
+        return EXIT_FAILURE;
+      }
+    }
+
     try {
       const auto servers = ExcludeServers(
           CollectServers(access_tokens, sni, censorship_strategy),
@@ -1313,38 +1377,8 @@ int main(int argc, char* argv[]) {
     std::unique_ptr<LatencyWatchdog> watchdog;
     std::mutex switch_mutex;
 
-    /* local status API */
-    std::unique_ptr<fptn::client::status::StatusServer> status_server;
-    if (!status_listen.empty()) {
-      const auto colon = status_listen.rfind(':');
-      if (colon == std::string::npos) {
-        SPDLOG_ERROR(
-            "Invalid --status-listen value '{}', expected <address>:<port>",
-            status_listen);
-        return EXIT_FAILURE;
-      }
-      fptn::client::status::StatusServer::Options options;
-      options.listen_address = status_listen.substr(0, colon);
-      options.secret = status_secret;
-      try {
-        options.listen_port = static_cast<std::uint16_t>(
-            std::stoi(status_listen.substr(colon + 1)));
-      } catch (const std::exception&) {
-        SPDLOG_ERROR("Invalid port in --status-listen '{}'", status_listen);
-        return EXIT_FAILURE;
-      }
-
-      status_server = std::make_unique<fptn::client::status::StatusServer>(
-          options, registry);
-      status_server->SetDelayProbe(
-          [sni, censorship_strategy](const ServerInfo& server,
-              int timeout_ms) -> std::uint32_t {
-            const int timeout_sec = std::max(1, timeout_ms / 1000);
-            const auto ms = fptn::utils::speed_estimator::GetDownloadTimeMs(
-                server, sni, timeout_sec, server.md5_fingerprint,
-                censorship_strategy);
-            return ms == UINT64_MAX ? 0 : static_cast<std::uint32_t>(ms);
-          });
+    /* tunnel-facing callbacks: only now is there a tunnel to report on */
+    if (status_server) {
       status_server->SetStatusProvider(
           [&vpn_client, &socks_server, registry, &sni, bypass_method]() {
         nlohmann::json socks = nlohmann::json{{"enabled", false}};
@@ -1386,7 +1420,7 @@ int main(int argc, char* argv[]) {
 
         if (fptn::client::status::ServerRegistry::KeyOf(server) ==
             fptn::client::status::ServerRegistry::KeyOf(selected_server)) {
-          return true;  // уже на нём
+          return true;  // already there
         }
 
         // A switch drops the current session before a new one exists: the
@@ -1426,11 +1460,6 @@ int main(int argc, char* argv[]) {
         }
         return true;
       });
-
-      if (!status_server->Start()) {
-        SPDLOG_ERROR("Failed to start the status API");
-        return EXIT_FAILURE;
-      }
     }
 
     /* start event loop */
@@ -1443,16 +1472,21 @@ int main(int argc, char* argv[]) {
     }
 
     if (max_ping > 0 && !server_pinned) {
+      // Same lock as the switch handler: both write this pointer, and the
+      // handler runs on the status API thread.
+      const std::scoped_lock<std::mutex> lock(switch_mutex);
+      // selected_server is written by the switch handler under this lock too.
       watchdog = std::make_unique<LatencyWatchdog>(selected_server, sni,
           censorship_strategy, max_ping,
           [&vpn_client]() { vpn_client.Stop(); }, registry);
     }
     fptn::utils::WaitForSignal(vpn_client);
-    watchdog.reset();
-    pool_monitor.reset();
-    if (status_server) {
-      status_server->Stop();
+    {
+      const std::scoped_lock<std::mutex> lock(switch_mutex);
+      watchdog.reset();
     }
+    pool_monitor.reset();
+
 
     /* clean */
     if (socks_server) {
@@ -1465,7 +1499,13 @@ int main(int argc, char* argv[]) {
       route_manager->Clean();
     }
     vpn_client.Stop();
+    // Stopped after the route cleanup, but before the logger goes away: its
+    // threads still log while they wind down.
+    if (status_server) {
+      status_server->Stop();
+    }
     spdlog::shutdown();
+
     return EXIT_SUCCESS;
   } catch (const std::exception& ex) {
     SPDLOG_ERROR("An error occurred: {}. Exiting...", ex.what());

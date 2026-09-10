@@ -172,7 +172,19 @@ bool VpnManager::SwitchClient(
   auto previous = std::move(config_.http_client);
   previous->Stop();
 
-  auto client = make_client();
+  fptn::vpn::http::ClientPtr client;
+  try {
+    client = make_client();
+  } catch (const std::exception& ex) {
+    // The factory resolves DNS, allocates and logs in, so it can throw. If
+    // that escaped, http_client stayed empty for good: the packet paths went
+    // quiet, switching_ never cleared so IsStarted() kept answering "yes",
+    // and the supervisor dereferenced the null pointer.
+    SPDLOG_ERROR("Switch failed: {}", ex.what());
+  } catch (...) {  // NOLINT
+    SPDLOG_ERROR("Switch failed with an unknown error");
+  }
+
   if (!client) {
     SPDLOG_WARN("Switch failed, staying on the current server");
     config_.http_client = std::move(previous);
@@ -290,6 +302,9 @@ std::size_t VpnManager::GetReceiveRate() {
 }
 
 std::string VpnManager::GetInterfaceName() const {
+  // Stop() resets the interface under the mutex, and this getter is
+  // called from the status API thread.
+  const std::lock_guard<std::mutex> lock(mutex_);
   if (config_.virtual_net_interface) {
     return config_.virtual_net_interface->Name();
   }
@@ -455,6 +470,9 @@ void VpnManager::Supervise() {
     {
       const std::unique_lock<std::mutex> lock(mutex_);  // mutex
 
+      if (!config_.http_client || !config_.virtual_net_interface) {
+        break;
+      }
       config_.http_client->Stop();
       tun_name = config_.virtual_net_interface->Name();
     }
@@ -481,6 +499,9 @@ void VpnManager::Supervise() {
     {
       const std::unique_lock<std::mutex> lock(mutex_);  // mutex
 
+      if (!config_.http_client) {
+        break;
+      }
       config_.http_client->Start();
     }
   }

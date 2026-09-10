@@ -442,15 +442,34 @@ boost::asio::awaitable<Response> ApiClient::AsyncPost(const std::string& handle,
     }
 
     if (fptn::protocol::https::GetRoutingMark() != 0) {
-      // The mark has to be on the socket before the SYN, and async_connect
-      // opens it itself, so the marked path connects to the first endpoint.
-      auto& socket = boost::beast::get_lowest_layer(stream).socket();
-      const auto endpoint = results.begin()->endpoint();
-      socket.open(endpoint.protocol(), ec);
-      if (!ec) {
+      // The mark has to be on the socket before the SYN, and a range connect
+      // reopens the socket per attempt, which would drop it. So the endpoints
+      // are walked by hand - every one of them, because a host with several
+      // addresses must keep its fallback. The connect still goes through the
+      // beast stream: a raw socket connect ignores the stream deadline, and a
+      // blackholed address would then hang on the kernel SYN timeout instead.
+      ec = boost::asio::error::host_not_found;
+      for (const auto& entry : results) {
+        auto& socket = boost::beast::get_lowest_layer(stream).socket();
+        boost::system::error_code open_ec;
+        socket.open(entry.endpoint().protocol(), open_ec);
+        if (open_ec) {
+          // Without the mark the tunnel traffic would come back through the
+          // tunnel, so an unmarked socket is worse than no connection.
+          SPDLOG_ERROR("AsyncPost [{}] - Cannot open a marked socket: {}",
+              handle, open_ec.message());
+          ec = open_ec;
+          break;
+        }
         fptn::protocol::https::ApplyRoutingMark(socket.native_handle());
-        co_await socket.async_connect(
-            endpoint, boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+        co_await boost::beast::get_lowest_layer(stream).async_connect(
+            entry.endpoint(),
+            boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+        if (!ec) {
+          break;
+        }
+        boost::system::error_code close_ec;
+        socket.close(close_ec);
       }
     } else {
       co_await boost::beast::get_lowest_layer(stream).async_connect(

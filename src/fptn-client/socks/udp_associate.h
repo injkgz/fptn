@@ -23,7 +23,10 @@ namespace fptn::socks {
 // UDP ASSOCIATE (RFC 1928, sections 4 and 7). One association per control
 // connection; datagrams are relayed through kernel sockets bound to the TUN
 // address. FRAG != 0 is rejected.
-class UdpAssociate {
+// Held through a shared_ptr: the per-target receive loops are spawned
+// detached, and a completion already queued when the association closes would
+// otherwise run against a destroyed object.
+class UdpAssociate : public std::enable_shared_from_this<UdpAssociate> {
  public:
   struct Config {
     std::string listen_address;

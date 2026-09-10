@@ -9,6 +9,7 @@ Distributed under the MIT License (https://opensource.org/licenses/MIT)
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <functional>
 #include <cstddef>
 #include <cstring>
 #include <iterator>
@@ -63,9 +64,50 @@ constexpr std::uint8_t kRepAddressNotSupported = 0x08;
 // 32 KB would cost 32 MB on relaying alone.
 constexpr std::size_t kRelayBufferSize = 16 * 1024;
 
+// Runs an action on scope exit, once, and can be triggered early.
+class Finally final {
+ public:
+  explicit Finally(std::function<void()> action)
+      : action_(std::move(action)) {}
+  ~Finally() { Run(); }
+
+  void Run() const {
+    if (action_) {
+      auto action = std::move(action_);
+      action_ = nullptr;
+      action();
+    }
+  }
+
+  Finally(const Finally&) = delete;
+  Finally& operator=(const Finally&) = delete;
+
+ private:
+  mutable std::function<void()> action_;
+};
+
+// Releases a session slot however the session ends.
+class SessionCount final {
+ public:
+  explicit SessionCount(std::atomic<std::size_t>& counter) : counter_(counter) {
+    ++counter_;
+  }
+  ~SessionCount() { --counter_; }
+
+  SessionCount(const SessionCount&) = delete;
+  SessionCount& operator=(const SessionCount&) = delete;
+
+ private:
+  std::atomic<std::size_t>& counter_;
+};
+
 // Upper bound on the pause between accept attempts once descriptors run
 // out.
 constexpr std::chrono::milliseconds kAcceptBackoffMax{2000};
+
+// How long a client may take to finish the SOCKS handshake. Without it a
+// connection that sends nothing holds its descriptors until the process ends.
+constexpr std::chrono::seconds kHandshakeTimeout{15};
 
 std::uint8_t ErrorToReply(const boost::system::error_code& ec) {
   if (ec == boost::asio::error::connection_refused) {
@@ -325,9 +367,17 @@ boost::asio::awaitable<void> Socks5Server::AcceptLoop() {
         ioc_,
         [this, sock = std::move(client)]() mutable
         -> boost::asio::awaitable<void> {
-          ++active_sessions_;
-          co_await HandleSession(std::move(sock));
-          --active_sessions_;
+          // The counter is released by the guard: an exception thrown inside
+          // the session used to skip the decrement, and co_spawn swallows it,
+          // so the count crept up until the server refused everyone.
+          SessionCount guard(active_sessions_);
+          try {
+            co_await HandleSession(std::move(sock));
+          } catch (const std::exception& ex) {
+            SPDLOG_DEBUG("SOCKS5: session ended with an error - {}", ex.what());
+          } catch (...) {  // NOLINT
+            SPDLOG_DEBUG("SOCKS5: session ended with an unknown error");
+          }
         },
         boost::asio::detached);
   }
@@ -341,6 +391,30 @@ boost::asio::awaitable<void> Socks5Server::HandleSession(
   const auto session_id = ++session_counter_;
   boost::system::error_code ec;
   auto executor = co_await boost::asio::this_coro::executor;
+
+  // A client that connects and then says nothing used to hold its descriptors
+  // until the process ended: the idle timer only starts once the relay is up.
+  // This deadline covers the handshake itself.
+  // The socket is reached through a shared flag rather than by reference: the
+  // wait handler may still be queued after the coroutine frame is gone.
+  auto handshake_socket = std::make_shared<boost::asio::ip::tcp::socket*>(
+      &client);
+  boost::asio::steady_timer handshake_deadline(executor);
+  handshake_deadline.expires_after(kHandshakeTimeout);
+  handshake_deadline.async_wait(
+      [handshake_socket](const boost::system::error_code& e) {
+        if (!e && *handshake_socket != nullptr) {
+          boost::system::error_code ignored;
+          (*handshake_socket)->close(ignored);
+        }
+      });
+  // Detaches the deadline from the socket on every exit path, including the
+  // early ones: the handler then has nothing to touch.
+  const Finally drop_deadline([&handshake_deadline, handshake_socket]() {
+    *handshake_socket = nullptr;
+    handshake_deadline.cancel();
+  });
+  const auto finish_handshake = [&drop_deadline]() { drop_deadline.Run(); };
 
   // --- greeting: VER | NMETHODS | METHODS... ---
   std::array<std::uint8_t, 2> greeting{};
@@ -528,6 +602,9 @@ boost::asio::awaitable<void> Socks5Server::HandleSession(
   // session frame alive all that time - and both sockets with it. On a stream
   // of hundreds of connections a minute, descriptors piled up by the thousand
   // and hit the session cap.
+  // The handshake is over; from here the idle timer governs the session.
+  finish_handshake();
+
   boost::asio::steady_timer idle(executor);
   idle.expires_after(config_.idle_timeout);
   co_await((Relay(client, remote, idle) && Relay(remote, client, idle)) ||
@@ -597,7 +674,7 @@ boost::asio::awaitable<void> Socks5Server::HandleUdpAssociate(
   using boost::asio::experimental::awaitable_operators::operator||;
 
   auto executor = co_await boost::asio::this_coro::executor;
-  UdpAssociate associate(executor,
+  auto associate = std::make_shared<UdpAssociate>(executor,
       UdpAssociate::Config{
           .listen_address = config_.listen_address,
           .tun_address_ipv4 = config_.tun_address_ipv4,
@@ -606,7 +683,7 @@ boost::asio::awaitable<void> Socks5Server::HandleUdpAssociate(
       resolver_.get(), session_id);
 
   boost::system::error_code ec;
-  if (!associate.Open(ec)) {
+  if (!associate->Open(ec)) {
     SPDLOG_WARN("SOCKS5[{}]: UDP associate failed: {}", session_id,
         ec.message());
     co_await SendReply(client, kRepGeneralFailure);
@@ -614,15 +691,15 @@ boost::asio::awaitable<void> Socks5Server::HandleUdpAssociate(
   }
 
   co_await SendReplyWithEndpoint(
-      client, kRepSuccess, associate.BoundEndpoint());
+      client, kRepSuccess, associate->BoundEndpoint());
   SPDLOG_DEBUG("SOCKS5[{}]: UDP associate on {}:{}", session_id,
-      associate.BoundEndpoint().address().to_string(),
-      associate.BoundEndpoint().port());
+      associate->BoundEndpoint().address().to_string(),
+      associate->BoundEndpoint().port());
 
   // Reading the control connection is how its close is noticed; a compliant
   // client sends nothing on it, so any byte just keeps the wait alive.
-  co_await(associate.Run() || WaitForClose(client));
-  associate.Close();
+  co_await(associate->Run() || WaitForClose(client));
+  associate->Close();
 }
 
 boost::asio::awaitable<void> Socks5Server::WaitForClose(
@@ -912,7 +989,7 @@ boost::asio::awaitable<TunnelResolver::Answer> TunnelResolver::QueryOverUdp(
   std::vector<std::uint8_t> request;
   if (!BuildQuery(host, qtype, query_id, &request)) {
     SPDLOG_WARN("TunnelResolver: bad hostname '{}'", host);
-    answer.answered = true;  // имя негодное, повторять нечего
+    answer.answered = true;  // the name is bad, retrying changes nothing
     co_return answer;
   }
 

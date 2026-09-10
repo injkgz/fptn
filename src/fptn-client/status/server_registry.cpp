@@ -7,8 +7,8 @@ Distributed under the MIT License (https://opensource.org/licenses/MIT)
 #include "fptn-client/status/server_registry.h"
 
 #include <algorithm>
-#include <chrono>
 #include <cctype>
+#include <chrono>
 #include <ctime>
 #include <iomanip>
 #include <sstream>
@@ -22,6 +22,9 @@ Distributed under the MIT License (https://opensource.org/licenses/MIT)
 namespace fptn::client::status {
 
 namespace {
+
+// The name of the synthetic selector group in the Clash view.
+constexpr const char* kSelectorName = "FPTN";
 
 std::uint64_t NowMs() {
   return static_cast<std::uint64_t>(
@@ -88,7 +91,7 @@ void ServerRegistry::Reset(const std::vector<ServerInfo>& servers) {
   for (const auto& server : servers) {
     auto key = KeyOf(server);
     if (next.contains(key)) {
-      continue;  // один и тот же узел пришёл из двух токенов
+      continue;  // the same node arrived from two tokens
     }
     Entry entry;
     // Measurements survive a pool rebuild: same server, no need to re-probe.
@@ -190,11 +193,25 @@ std::optional<ServerInfo> ServerRegistry::FindByName(
 
 ServerStats ServerRegistry::Summarize(const Entry& entry) {
   ServerStats stats;
-  stats.total = entry.window.size();
+
+  // Stale readings are ignored rather than dropped from the window: the
+  // history stays visible in /status, but neither the average nor "alive"
+  // rests on a measurement from hours ago.
+  const auto now = NowMs();
+  const auto ttl_ms = static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(kMeasurementTtl)
+          .count());
+  const auto fresh = [&](const Measurement& m) {
+    return ttl_ms == 0 || now < m.at_ms + ttl_ms;
+  };
 
   std::uint64_t sum = 0;
   std::size_t counted = 0;
   for (const auto& measurement : entry.window) {
+    if (!fresh(measurement)) {
+      continue;
+    }
+    ++stats.total;
     if (measurement.delay_ms == 0) {
       ++stats.failed;
       continue;
@@ -210,9 +227,11 @@ ServerStats ServerRegistry::Summarize(const Entry& entry) {
   if (counted != 0) {
     stats.average_ms = static_cast<std::uint32_t>(sum / counted);
   }
-  // A server counts as alive when its latest probe succeeded: one failure in
-  // the middle of the window is no reason to strike the node out.
-  stats.alive = !entry.window.empty() && entry.window.back().delay_ms != 0;
+  // A server counts as alive when its latest probe succeeded and is still
+  // fresh: one failure in the middle of the window is no reason to strike the
+  // node out, but a reading that has expired says nothing either.
+  stats.alive = !entry.window.empty() && entry.window.back().delay_ms != 0 &&
+                fresh(entry.window.back());
   return stats;
 }
 
@@ -279,8 +298,17 @@ nlohmann::json ServerRegistry::ToClashProxies() const {
       continue;
     }
     const auto& entry = it->second;
-    const auto name = DisplayName(entry.info);
     const auto stats = Summarize(entry);
+
+    // The JSON key has to be unique, while a display name does not: two
+    // tokens can carry servers with the same name. A collision would
+    // otherwise silently drop one of them from the view, so the key falls
+    // back to host:port. A name colliding with the selector group is
+    // disambiguated the same way.
+    auto name = DisplayName(entry.info);
+    if (name.empty() || name == kSelectorName || proxies.contains(name)) {
+      name = key;
+    }
 
     // Clash puts only the latest measurement in history, not the whole
     // window: dashboards read history[0] and expect a fresh value there.
@@ -306,7 +334,8 @@ nlohmann::json ServerRegistry::ToClashProxies() const {
 
   // The selector group: through it a transparent proxy sees the current
   // choice and can switch servers with the same PUT as with sing-box.
-  proxies["FPTN"] = nlohmann::json{{"type", "Selector"}, {"name", "FPTN"},
+  proxies[kSelectorName] = nlohmann::json{{"type", "Selector"},
+      {"name", kSelectorName},
       {"udp", true}, {"history", nlohmann::json::array()},
       {"now", current_name}, {"all", all}};
 

@@ -10,8 +10,10 @@ Distributed under the MIT License (https://opensource.org/licenses/MIT)
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <boost/asio.hpp>
 
@@ -63,8 +65,9 @@ class StatusServer final {
   [[nodiscard]] bool IsRunning() const { return running_; }
 
  private:
-  void AcceptLoop();
-  void HandleConnection(boost::asio::ip::tcp::socket socket);
+  boost::asio::awaitable<void> AcceptLoop();
+  boost::asio::awaitable<void> HandleConnection(
+      boost::asio::ip::tcp::socket socket);
 
   struct Reply {
     unsigned status = 200;
@@ -82,13 +85,24 @@ class StatusServer final {
   const Options options_;
   const std::shared_ptr<ServerRegistry> registry_;
 
+  // The callbacks are installed after Start(): the endpoint comes up before a
+  // server is chosen, and the tunnel-facing ones only exist later. Requests
+  // are already being served from the accept thread by then, so reads and
+  // writes go through the mutex.
+  mutable std::mutex callbacks_mutex_;
   DelayProbe delay_probe_;
   SwitchServer switch_server_;
   StatusProvider status_provider_;
 
-  boost::asio::io_context ioc_;
+  // More than one thread runs the context: an on-demand probe blocks the
+  // thread it lands on for seconds, and the rest of the API has to keep
+  // answering meanwhile - a supervising daemon reads an unresponsive endpoint
+  // as a failed section.
+  static constexpr int kThreads = 2;
+
+  boost::asio::io_context ioc_{kThreads};
   std::unique_ptr<boost::asio::ip::tcp::acceptor> acceptor_;
-  std::thread thread_;
+  std::vector<std::thread> threads_;
   std::atomic<bool> running_{false};
 };
 

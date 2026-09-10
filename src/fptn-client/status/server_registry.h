@@ -6,6 +6,7 @@ Distributed under the MIT License (https://opensource.org/licenses/MIT)
 
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <mutex>
@@ -28,10 +29,16 @@ using fptn::utils::speed_estimator::ServerInfo;
 // A window allows reporting an average and a failure count instead.
 constexpr std::size_t kMeasurementWindow = 10;
 
+// How long a measurement stays meaningful. Without this the window is only
+// bounded by its size, so with --probe-interval off (the default) a server
+// keeps reporting the single reading taken at startup as if it were fresh -
+// including "alive" for a node that died hours ago.
+constexpr std::chrono::seconds kMeasurementTtl{15 * 60};
+
 struct Measurement {
-  std::uint64_t at_ms = 0;      // время замера, unix ms
-  std::uint32_t delay_ms = 0;   // 0 означает неудачу - как в Clash API
-  std::string error;            // причина, если delay_ms == 0
+  std::uint64_t at_ms = 0;      // when it was taken, unix ms
+  std::uint32_t delay_ms = 0;   // 0 means failure, as in the Clash API
+  std::string error;            // why, when delay_ms == 0
 };
 
 struct ServerStats {

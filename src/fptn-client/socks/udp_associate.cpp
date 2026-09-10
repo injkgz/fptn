@@ -300,8 +300,8 @@ UdpAssociate::Session* UdpAssociate::FindOrCreate(const Key& key,
   raw->receiving = true;
   boost::asio::co_spawn(
       executor_,
-      [this, key]() -> boost::asio::awaitable<void> {
-        co_await ReceiveLoop(key);
+      [self = shared_from_this(), key]() -> boost::asio::awaitable<void> {
+        co_await self->ReceiveLoop(key);
       },
       boost::asio::detached);
   return raw;

@@ -18,13 +18,25 @@ LeakyBucket::LeakyBucket(std::size_t max_bites_per_second)
 {}
 
 std::size_t LeakyBucket::FullDataAmount() const noexcept {
+  // Read under the mutex: the counter is updated from every packet path.
+  const std::unique_lock<std::mutex> lock(mutex_);  // mutex
   return full_data_amount_;
 }
 
 bool LeakyBucket::CheckSpeedLimit(std::size_t packet_size) noexcept {
+  return CheckSpeedLimitAt(packet_size, std::chrono::steady_clock::now());
+}
+
+bool LeakyBucket::CheckSpeedLimitAt(std::size_t packet_size,
+    std::chrono::steady_clock::time_point now) noexcept {
   const std::unique_lock<std::mutex> lock(mutex_);  // mutex
 
-  const auto now = std::chrono::steady_clock::now();
+  // Zero means the user has no bandwidth limit.
+  if (max_bytes_per_second_ == 0) {
+    full_data_amount_ += packet_size;
+    return true;
+  }
+
   const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
       now - last_leak_time_)
                            .count();
