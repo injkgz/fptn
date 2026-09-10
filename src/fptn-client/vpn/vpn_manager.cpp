@@ -136,15 +136,16 @@ bool VpnManager::Start() {
 
 bool VpnManager::IsClientStarted() const {
   // Клиент можно подменить на лету, поэтому указатель читаем под мьютексом.
-  const std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
-  return lock.owns_lock() && config_.http_client &&
-         config_.http_client->IsStarted();
+  // Именно полным, а не try_lock: под try_lock занятый мьютекс (а его держит
+  // отправка пакетов) выглядел бы как "клиент не запущен", и супервизор
+  // затевал бы полный рестарт туннеля на ровном месте.
+  const std::lock_guard<std::mutex> lock(mutex_);
+  return config_.http_client && config_.http_client->IsStarted();
 }
 
 bool VpnManager::IsClientConnected() const {
-  const std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
-  return lock.owns_lock() && config_.http_client &&
-         config_.http_client->IsConnected();
+  const std::lock_guard<std::mutex> lock(mutex_);
+  return config_.http_client && config_.http_client->IsConnected();
 }
 
 bool VpnManager::SwitchClient(
