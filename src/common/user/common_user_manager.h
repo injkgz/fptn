@@ -7,6 +7,7 @@ Distributed under the MIT License (https://opensource.org/licenses/MIT)
 #pragma once
 
 #include <algorithm>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -91,12 +92,15 @@ class CommonUserManager final {
     return false;
   }
 
-  int GetUserBandwidthBit(const std::string& username) const {
+  // Возвращает биты в секунду. int здесь переполнялся: лимит 10000 МБ/с
+  // давал 10 485 760 000, что не влезает в 32 бита, и наружу уходило
+  // 1 895 825 408 - в пять с лишним раз меньше заданного.
+  std::int64_t GetUserBandwidthBit(const std::string& username) const {
     const std::scoped_lock lock(mutex_);  // mutex
 
     auto it = users_.find(username);
     if (it != users_.end()) {
-      return it->second.second * 1024 * 1024;
+      return static_cast<std::int64_t>(it->second.second) * 1024 * 1024;
     }
     return 0;
   }

@@ -6,6 +6,8 @@ Distributed under the MIT License (https://opensource.org/licenses/MIT)
 
 #include "traffic_shaper/leaky_bucket.h"
 
+#include <cstdint>
+
 namespace fptn::traffic_shaper {
 
 LeakyBucket::LeakyBucket(std::size_t max_bites_per_second)
@@ -24,17 +26,29 @@ bool LeakyBucket::CheckSpeedLimit(std::size_t packet_size) noexcept {
 
   const auto now = std::chrono::steady_clock::now();
   const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-      now - last_leak_time_).count();
-  if (elapsed < 1000) {
-    if (current_amount_ + packet_size < max_bytes_per_second_) {
-      current_amount_ += packet_size;
-      full_data_amount_ += packet_size;
-      return true;
-    }
-    return false;
+      now - last_leak_time_)
+                           .count();
+
+  // Ведро протекает пропорционально прошедшему времени. Раньше счётчик
+  // сбрасывался только тогда, когда очередной пакет приходил спустя секунду
+  // после предыдущего сброса: при плотном потоке такой паузы не случается
+  // никогда, счётчик упирался в потолок и дальше отбрасывалось всё подряд -
+  // до первого затишья. Из-за этого скачивание проседало в разы сильнее
+  // отдачи, где паузы бывают часто.
+  if (elapsed > 0) {
+    const auto leaked = static_cast<std::size_t>(
+        (static_cast<std::uint64_t>(max_bytes_per_second_) *
+            static_cast<std::uint64_t>(elapsed)) /
+        1000U);
+    current_amount_ = (current_amount_ > leaked) ? current_amount_ - leaked : 0;
+    last_leak_time_ = now;
   }
-  last_leak_time_ = now;
-  current_amount_ = packet_size;
-  return true;
+
+  if (current_amount_ + packet_size <= max_bytes_per_second_) {
+    current_amount_ += packet_size;
+    full_data_amount_ += packet_size;
+    return true;
+  }
+  return false;
 }
 }  // namespace fptn::traffic_shaper
