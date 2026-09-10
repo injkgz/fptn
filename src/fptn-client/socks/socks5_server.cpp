@@ -71,11 +71,16 @@ class Finally final {
       : action_(std::move(action)) {}
   ~Finally() { Run(); }
 
-  void Run() const {
-    if (action_) {
-      auto action = std::move(action_);
-      action_ = nullptr;
+  void Run() const noexcept {
+    if (!action_) {
+      return;
+    }
+    auto action = std::move(action_);
+    action_ = nullptr;
+    // Runs from a destructor: a throwing action would take the process down.
+    try {
       action();
+    } catch (...) {  // NOLINT
     }
   }
 
@@ -105,9 +110,7 @@ class SessionCount final {
 // out.
 constexpr std::chrono::milliseconds kAcceptBackoffMax{2000};
 
-// How long a client may take to finish the SOCKS handshake. Without it a
-// connection that sends nothing holds its descriptors until the process ends.
-constexpr std::chrono::seconds kHandshakeTimeout{15};
+
 
 std::uint8_t ErrorToReply(const boost::system::error_code& ec) {
   if (ec == boost::asio::error::connection_refused) {
@@ -400,7 +403,7 @@ boost::asio::awaitable<void> Socks5Server::HandleSession(
   auto handshake_socket = std::make_shared<boost::asio::ip::tcp::socket*>(
       &client);
   boost::asio::steady_timer handshake_deadline(executor);
-  handshake_deadline.expires_after(kHandshakeTimeout);
+  handshake_deadline.expires_after(config_.handshake_timeout);
   handshake_deadline.async_wait(
       [handshake_socket](const boost::system::error_code& e) {
         if (!e && *handshake_socket != nullptr) {
@@ -515,6 +518,10 @@ boost::asio::awaitable<void> Socks5Server::HandleSession(
       static_cast<std::uint16_t>((port_bytes[0] << 8) | port_bytes[1]);
 
   if (command == kCmdUdpAssociate) {
+    // The association outlives the handshake, so the deadline has to go with
+    // it: its handler closes the control socket, which would tear the
+    // association down after fifteen seconds.
+    finish_handshake();
     co_await HandleUdpAssociate(client, session_id);
     co_return;
   }

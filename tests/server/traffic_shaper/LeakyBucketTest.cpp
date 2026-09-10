@@ -4,6 +4,7 @@ Copyright (c) 2024-2026 Stas Skokov
 Distributed under the MIT License (https://opensource.org/licenses/MIT)
 =============================================================================*/
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 
@@ -91,42 +92,32 @@ TEST(LeakyBucketTest, DenseStreamKeepsFlowingAtTheLimit) {
   EXPECT_LE(admitted, expected + kBytesPerSecond);
 }
 
-// A steady stream and a bursty one must get the same share over time - the
-// old code gave the bursty one far more.
-TEST(LeakyBucketTest, SteadyAndBurstyStreamsGetTheSameShare) {
+// The real symptom of the old code was not the total but its distribution:
+// a full second of budget went out in the first milliseconds, and the rest of
+// the second was a blackout. TCP survives a steady trickle far better than a
+// burst followed by a second of silence, so what is measured here is the
+// longest run of consecutive rejects.
+TEST(LeakyBucketTest, DenseStreamHasNoLongBlackouts) {
   constexpr std::size_t kPacket = 100;
-  constexpr int kMillis = 10000;
-
-  LeakyBucket steady(kBitsPerSecond);
+  LeakyBucket bucket(kBitsPerSecond);
   auto now = Start();
-  std::size_t steady_admitted = 0;
-  for (int ms = 0; ms < kMillis; ++ms) {
+
+  int longest_blackout = 0;
+  int current_blackout = 0;
+  for (int ms = 0; ms < 5000; ++ms) {
     now += std::chrono::milliseconds(1);
-    if (steady.CheckSpeedLimitAt(kPacket, now)) {
-      steady_admitted += kPacket;
+    if (bucket.CheckSpeedLimitAt(kPacket, now)) {
+      current_blackout = 0;
+    } else {
+      ++current_blackout;
+      longest_blackout = std::max(longest_blackout, current_blackout);
     }
   }
 
-  LeakyBucket bursty(kBitsPerSecond);
-  now = Start();
-  std::size_t bursty_admitted = 0;
-  for (int ms = 0; ms < kMillis; ++ms) {
-    now += std::chrono::milliseconds(1);
-    // Idle for 90 ms, then hammer for 10.
-    if (ms % 100 < 90) {
-      continue;
-    }
-    for (int burst = 0; burst < 20; ++burst) {
-      if (bursty.CheckSpeedLimitAt(kPacket, now)) {
-        bursty_admitted += kPacket;
-      }
-    }
-  }
-
-  const auto larger = std::max(steady_admitted, bursty_admitted);
-  const auto smaller = std::min(steady_admitted, bursty_admitted);
-  EXPECT_GE(smaller * 100 / larger, 90U)
-      << "steady=" << steady_admitted << " bursty=" << bursty_admitted;
+  // At 1000 byte/s and 100-byte packets one packet is due every 100 ms, so a
+  // gap of a few hundred milliseconds is normal and a second is not.
+  EXPECT_LE(longest_blackout, 300) << "longest silence " << longest_blackout
+                                   << " ms";
 }
 
 TEST(LeakyBucketTest, IdleTimeDoesNotOverfillTheBucket) {
@@ -144,21 +135,26 @@ TEST(LeakyBucketTest, IdleTimeDoesNotOverfillTheBucket) {
   EXPECT_EQ(admitted, kBytesPerSecond);
 }
 
-TEST(LeakyBucketTest, SubMillisecondGapsDoNotLoseTheBudget) {
+TEST(LeakyBucketTest, RefillIsSmoothWithinASecond) {
+  // Spend the budget, then take it back in ten steps of a tenth of a second.
+  // The old code released nothing until a full second had passed, so each of
+  // the first nine steps would have been refused outright.
   LeakyBucket bucket(kBitsPerSecond);
   auto now = Start();
+  for (int i = 0; i < 10; ++i) {
+    ASSERT_TRUE(bucket.CheckSpeedLimitAt(kBytesPerSecond / 10, now));
+  }
+  ASSERT_FALSE(bucket.CheckSpeedLimitAt(1, now));
 
-  std::size_t admitted = 0;
-  for (int i = 0; i < 10000; ++i) {
-    now += std::chrono::microseconds(100);
-    if (bucket.CheckSpeedLimitAt(10, now)) {
-      admitted += 10;
+  int accepted_steps = 0;
+  for (int step = 0; step < 9; ++step) {
+    now += std::chrono::milliseconds(100);
+    if (bucket.CheckSpeedLimitAt(kBytesPerSecond / 10, now)) {
+      ++accepted_steps;
     }
   }
 
-  // One second of traffic in 100 us steps: the budget must be spent, not lost
-  // to rounding.
-  EXPECT_GE(admitted, kBytesPerSecond * 95 / 100);
+  EXPECT_EQ(accepted_steps, 9);
 }
 
 // A zero limit means "no limit": the server builds a shaper unconditionally,

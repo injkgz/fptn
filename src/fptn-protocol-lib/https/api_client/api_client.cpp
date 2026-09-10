@@ -459,7 +459,9 @@ boost::asio::awaitable<Response> ApiClient::AsyncPost(const std::string& handle,
           SPDLOG_ERROR("AsyncPost [{}] - Cannot open a marked socket: {}",
               handle, open_ec.message());
           ec = open_ec;
-          break;
+          // Keep going: a router with no IPv6 route fails to open the AAAA
+          // endpoint, and the IPv4 one behind it is exactly the fallback.
+          continue;
         }
         fptn::protocol::https::ApplyRoutingMark(socket.native_handle());
         co_await boost::beast::get_lowest_layer(stream).async_connect(

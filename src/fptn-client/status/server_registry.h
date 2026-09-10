@@ -36,7 +36,11 @@ constexpr std::size_t kMeasurementWindow = 10;
 constexpr std::chrono::seconds kMeasurementTtl{15 * 60};
 
 struct Measurement {
-  std::uint64_t at_ms = 0;      // when it was taken, unix ms
+  std::uint64_t at_ms = 0;      // when it was taken, unix ms (for display)
+  // Freshness is judged on the monotonic clock: a router starts with a wrong
+  // wall clock and NTP moves it by a jump, which would otherwise expire every
+  // measurement at once - or keep them fresh forever if the jump went back.
+  std::chrono::steady_clock::time_point taken_at{};
   std::uint32_t delay_ms = 0;   // 0 means failure, as in the Clash API
   std::string error;            // why, when delay_ms == 0
 };

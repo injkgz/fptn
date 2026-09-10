@@ -131,6 +131,9 @@ class Socks5Server {
     // An idle session holds both descriptors for the life of the process
     // unless it is closed.
     std::chrono::seconds idle_timeout{300};
+    // How long a client may take to finish the handshake. Configurable so a
+    // test does not have to wait out the production value.
+    std::chrono::seconds handshake_timeout{15};
   };
 
   explicit Socks5Server(Config config);

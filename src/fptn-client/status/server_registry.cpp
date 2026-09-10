@@ -132,8 +132,10 @@ void ServerRegistry::RecordProbe(const ServerInfo& server,
     entry.last_error = error;
   }
 
-  entry.window.push_back(
-      Measurement{.at_ms = now, .delay_ms = delay_ms, .error = error});
+  entry.window.push_back(Measurement{.at_ms = now,
+      .taken_at = std::chrono::steady_clock::now(),
+      .delay_ms = delay_ms,
+      .error = error});
   while (entry.window.size() > kMeasurementWindow) {
     entry.window.pop_front();
   }
@@ -197,12 +199,9 @@ ServerStats ServerRegistry::Summarize(const Entry& entry) {
   // Stale readings are ignored rather than dropped from the window: the
   // history stays visible in /status, but neither the average nor "alive"
   // rests on a measurement from hours ago.
-  const auto now = NowMs();
-  const auto ttl_ms = static_cast<std::uint64_t>(
-      std::chrono::duration_cast<std::chrono::milliseconds>(kMeasurementTtl)
-          .count());
+  const auto now = std::chrono::steady_clock::now();
   const auto fresh = [&](const Measurement& m) {
-    return ttl_ms == 0 || now < m.at_ms + ttl_ms;
+    return kMeasurementTtl.count() == 0 || now - m.taken_at < kMeasurementTtl;
   };
 
   std::uint64_t sum = 0;

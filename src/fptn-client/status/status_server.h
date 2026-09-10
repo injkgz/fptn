@@ -81,6 +81,7 @@ class StatusServer final {
   [[nodiscard]] Reply HandleSwitch(
       const std::string& name, const std::string& body) const;
   [[nodiscard]] bool Authorized(const std::string& header) const;
+  [[nodiscard]] bool HostAllowed(const std::string& host) const;
 
   const Options options_;
   const std::shared_ptr<ServerRegistry> registry_;
@@ -100,6 +101,13 @@ class StatusServer final {
   // as a failed section.
   static constexpr int kThreads = 2;
 
+  // Guards Start() and Stop() against each other and against themselves:
+  // the destructor and an explicit Stop() can race, and a half-finished stop
+  // would leave threads inside a context that is about to be destroyed.
+  std::mutex lifecycle_mutex_;
+
+  // Declared before the acceptor and the threads so that it outlives them:
+  // suspended coroutine frames are destroyed with the context.
   boost::asio::io_context ioc_{kThreads};
   std::unique_ptr<boost::asio::ip::tcp::acceptor> acceptor_;
   std::vector<std::thread> threads_;

@@ -171,6 +171,20 @@ class Socks5Client {
     return ec_ ? std::string{} : std::string(buffer.begin(), buffer.end());
   }
 
+  // UDP ASSOCIATE with an all-zero address, as a client that does not know
+  // its source port yet sends it. Returns the reply code.
+  std::uint8_t UdpAssociate() {
+    const std::array<std::uint8_t, 10> request{
+        kVersion, 0x03, 0x00, kAtypIPv4, 0, 0, 0, 0, 0, 0};
+    boost::asio::write(socket_, boost::asio::buffer(request), ec_);
+    if (ec_) {
+      return kRepGeneralFailure;
+    }
+    std::array<std::uint8_t, 10> reply{};
+    boost::asio::read(socket_, boost::asio::buffer(reply), ec_);
+    return ec_ ? kRepGeneralFailure : reply[1];
+  }
+
   // Waits for the server to close the connection; false if it did not.
   bool WaitClosed(std::chrono::milliseconds limit) {  // NOLINT
     const auto deadline = std::chrono::steady_clock::now() + limit;
@@ -296,5 +310,47 @@ TEST(Socks5ServerTest, ClosesIdleSession) {
 
   EXPECT_TRUE(client.WaitClosed(std::chrono::seconds(5)));
 
+  server.Stop();
+}
+
+// A client that connects and says nothing used to hold its descriptors until
+// the process ended: the idle timer only starts once the relay is up.
+TEST(Socks5ServerTest, SilentClientIsDroppedAfterTheHandshakeDeadline) {
+  const auto port = PickFreePort();
+  auto config = MakeConfig(port);
+  config.handshake_timeout = std::chrono::seconds(1);
+
+  Socks5Server server(config);
+  ASSERT_TRUE(server.Start());
+
+  boost::asio::io_context ioc;
+  Socks5Client client(ioc, port);
+  ASSERT_TRUE(client.connected());
+
+  // Not a single byte is sent; the server has to give up on its own.
+  EXPECT_TRUE(client.WaitClosed(std::chrono::milliseconds(5000)));
+  server.Stop();
+}
+
+// The handshake deadline closes the control socket, so it has to be lifted
+// once the association is up - otherwise SOCKS5 UDP would live exactly as
+// long as the deadline, breaking DNS and QUIC through the proxy.
+TEST(Socks5ServerTest, UdpAssociateOutlivesTheHandshakeDeadline) {
+  const auto port = PickFreePort();
+  auto config = MakeConfig(port);
+  config.handshake_timeout = std::chrono::seconds(1);
+
+  Socks5Server server(config);
+  ASSERT_TRUE(server.Start());
+
+  boost::asio::io_context ioc;
+  Socks5Client client(ioc, port);
+  ASSERT_TRUE(client.connected());
+  ASSERT_EQ(client.Greet(kAuthNone), kAuthNone);
+  ASSERT_EQ(client.UdpAssociate(), kRepSuccess);
+
+  // Well past the deadline: the control connection has to stay open, because
+  // it is what keeps the association alive.
+  EXPECT_FALSE(client.WaitClosed(std::chrono::milliseconds(3000)));
   server.Stop();
 }
