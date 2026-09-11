@@ -9,8 +9,7 @@
 			"file": {
 				"/sbin/logread": [ "exec" ],
 				"/sbin/ip": [ "exec" ],
-				"/bin/ping": [ "exec" ],
-				"/var/log/fptn/fptn-client-cli.log": [ "read" ]
+				"/bin/ping": [ "exec" ]
 			}
 		},
 		"write": {
