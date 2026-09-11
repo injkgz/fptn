@@ -326,13 +326,13 @@ boost::asio::awaitable<void> StatusServer::HandleConnection(
   response.set(http::field::content_type, "application/json");
   response.keep_alive(false);
 
-  // A wildcard origin is only safe while there is nothing to guard: with a
-  // secret set, letting any page read the pool would defeat it. And a page
-  // whose domain is rebound to the loopback bypasses CORS entirely, so the
-  // Host header is checked as well.
-  if (options_.secret.empty()) {
-    response.set(http::field::access_control_allow_origin, "*");
-  }
+  // CORS is not an authentication mechanism and was never holding anything
+  // back here: a page that wants to read the pool still needs the token, and
+  // one that is rebound to the loopback bypasses CORS entirely. Withholding
+  // the header only kept browsers out - dashboards could not reach the API at
+  // all once a secret was set, and the preflight below failed with it. This is
+  // what sing-box and mihomo send, so existing dashboards work unchanged.
+  response.set(http::field::access_control_allow_origin, "*");
   if (!HostAllowed(std::string(request[http::field::host]))) {
     response.result(http::status::misdirected_request);
     response.body() = Serialize(nlohmann::json{{"message", "Bad host"}});
@@ -353,6 +353,14 @@ boost::asio::awaitable<void> StatusServer::HandleConnection(
     response.set(http::field::access_control_allow_headers,
         "Content-Type, Authorization");
     response.set(http::field::access_control_max_age, "600");
+    // Chrome asks before letting a page on a public origin reach a private
+    // address, which is every useful case here - the endpoint lives on a LAN
+    // address or on the loopback. Answering yes is only sound while the token
+    // is what decides, so an endpoint that asks for nothing keeps saying no.
+    if (!options_.secret.empty() &&
+        !request["Access-Control-Request-Private-Network"].empty()) {
+      response.set("Access-Control-Allow-Private-Network", "true");
+    }
     response.erase(http::field::content_type);
     response.body().clear();
     response.prepare_payload();

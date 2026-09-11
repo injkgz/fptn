@@ -211,6 +211,19 @@ whatever name the caller used.
 The token is compared without an early exit, so a wrong guess takes the same
 time whether it differs in the first character or the last.
 
+**CORS is open.** `Access-Control-Allow-Origin: *` goes out with every answer,
+refusals included, the way sing-box and mihomo do it — a dashboard that
+already speaks the Clash API works unchanged. It protects nothing to withhold
+it: reading the pool still needs the token, and a page whose domain is rebound
+to the loopback bypasses CORS entirely. The preflight carries no
+`Authorization` by definition, so it is answered before the token is checked.
+
+Chrome additionally asks before letting a page on a public origin reach a
+private address, which is every useful case here. That preflight is answered
+with `Access-Control-Allow-Private-Network: true` **only when a secret is
+set** — an endpoint that asks for nothing keeps saying no, so a page cannot
+use the browser to sweep `127.0.0.1`.
+
 ```sh
 fptn-client-cli --status-listen 0.0.0.0:9091 --status-secret "$TOKEN" ...
 curl -H "Authorization: Bearer $TOKEN" http://192.168.1.1:9091/proxies

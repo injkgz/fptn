@@ -42,22 +42,26 @@ std::uint16_t FreePort() {
   return port;
 }
 
-// Sends one raw request and returns the status line, empty on failure.
+// Sends one raw request and returns everything up to the end of the headers,
+// empty on failure. The status line is the first line of it.
 std::string Request(std::uint16_t port,
     const std::string& target,
     const std::string& host_header,
-    const std::string& authorization) {
+    const std::string& authorization,
+    const std::string& method = "GET",
+    const std::string& extra_headers = "") {
   try {
     boost::asio::io_context ioc;
     tcp::socket socket(ioc);
     socket.connect(tcp::endpoint(
         boost::asio::ip::make_address("127.0.0.1"), port));
 
-    std::string request = "GET " + target + " HTTP/1.1\r\n";
+    std::string request = method + " " + target + " HTTP/1.1\r\n";
     request += "Host: " + host_header + "\r\n";
     if (!authorization.empty()) {
       request += "Authorization: " + authorization + "\r\n";
     }
+    request += extra_headers;
     request += "Connection: close\r\n\r\n";
     boost::asio::write(socket, boost::asio::buffer(request));
 
@@ -70,15 +74,20 @@ std::string Request(std::uint16_t port,
         break;
       }
       response.append(buffer, read);
-      if (response.find("\r\n") != std::string::npos) {
+      if (response.find("\r\n\r\n") != std::string::npos) {
         break;
       }
     }
-    const auto end = response.find("\r\n");
+    const auto end = response.find("\r\n\r\n");
     return end == std::string::npos ? response : response.substr(0, end);
   } catch (const std::exception&) {
     return {};
   }
+}
+
+std::string StatusLine(const std::string& response) {
+  const auto end = response.find("\r\n");
+  return end == std::string::npos ? response : response.substr(0, end);
 }
 
 struct Server {
@@ -144,11 +153,13 @@ TEST(StatusServerTest, RejectsForeignHostWhenThereIsNoSecret) {
   auto started = Start("127.0.0.1", "");
   ASSERT_NE(started.server, nullptr);
 
-  const auto allowed = Request(started.port, "/version", "127.0.0.1", "");
+  const auto allowed =
+      StatusLine(Request(started.port, "/version", "127.0.0.1", ""));
   ASSERT_FALSE(allowed.empty()) << "no answer at all";
   EXPECT_NE(allowed.find("200"), std::string::npos) << allowed;
 
-  const auto rebound = Request(started.port, "/version", "evil.example", "");
+  const auto rebound =
+      StatusLine(Request(started.port, "/version", "evil.example", ""));
   EXPECT_EQ(rebound.find("200"), std::string::npos) << rebound;
 }
 
@@ -159,8 +170,8 @@ TEST(StatusServerTest, AcceptsForeignHostWhenSecretIsSet) {
   auto started = Start("127.0.0.1", "s3cret");
   ASSERT_NE(started.server, nullptr);
 
-  const auto answer = Request(
-      started.port, "/version", "router.lan:9091", "Bearer s3cret");
+  const auto answer = StatusLine(Request(
+      started.port, "/version", "router.lan:9091", "Bearer s3cret"));
   ASSERT_FALSE(answer.empty()) << "no answer at all";
   EXPECT_NE(answer.find("200"), std::string::npos) << answer;
 }
@@ -169,17 +180,18 @@ TEST(StatusServerTest, RejectsWrongAndMissingToken) {
   auto started = Start("127.0.0.1", "s3cret");
   ASSERT_NE(started.server, nullptr);
 
-  const auto wrong =
-      Request(started.port, "/version", "127.0.0.1", "Bearer nope");
+  const auto wrong = StatusLine(
+      Request(started.port, "/version", "127.0.0.1", "Bearer nope"));
   EXPECT_NE(wrong.find("401"), std::string::npos) << wrong;
 
-  const auto missing = Request(started.port, "/version", "127.0.0.1", "");
+  const auto missing =
+      StatusLine(Request(started.port, "/version", "127.0.0.1", ""));
   EXPECT_NE(missing.find("401"), std::string::npos) << missing;
 
   // A token of the right length must not pass either - the comparison runs to
   // the end, it does not stop at the first mismatch.
-  const auto same_length =
-      Request(started.port, "/version", "127.0.0.1", "Bearer s3crXt");
+  const auto same_length = StatusLine(
+      Request(started.port, "/version", "127.0.0.1", "Bearer s3crXt"));
   EXPECT_NE(same_length.find("401"), std::string::npos) << same_length;
 }
 
@@ -187,7 +199,69 @@ TEST(StatusServerTest, AcceptsTheRightToken) {
   auto started = Start("127.0.0.1", "s3cret");
   ASSERT_NE(started.server, nullptr);
 
+  const auto answer = StatusLine(
+      Request(started.port, "/version", "127.0.0.1", "Bearer s3cret"));
+  EXPECT_NE(answer.find("200"), std::string::npos) << answer;
+}
+
+// A dashboard served from another origin has to be able to read the answer,
+// and the preflight has to pass before it ever gets there. Withholding the
+// header kept browsers out entirely without keeping anyone honest: the token
+// is what decides.
+TEST(StatusServerTest, SendsCorsHeaderEvenWithASecret) {
+  auto started = Start("127.0.0.1", "s3cret");
+  ASSERT_NE(started.server, nullptr);
+
   const auto answer =
       Request(started.port, "/version", "127.0.0.1", "Bearer s3cret");
-  EXPECT_NE(answer.find("200"), std::string::npos) << answer;
+  EXPECT_NE(answer.find("Access-Control-Allow-Origin: *"), std::string::npos)
+      << answer;
+
+  // Even the refusal carries it - otherwise the browser reports a CORS error
+  // instead of the 401 that actually happened.
+  const auto refused =
+      Request(started.port, "/version", "127.0.0.1", "Bearer nope");
+  EXPECT_NE(refused.find("Access-Control-Allow-Origin: *"), std::string::npos)
+      << refused;
+}
+
+TEST(StatusServerTest, PreflightPassesWithASecret) {
+  auto started = Start("127.0.0.1", "s3cret");
+  ASSERT_NE(started.server, nullptr);
+
+  // A preflight never carries Authorization, so it has to be answered before
+  // the token is checked.
+  const auto answer = Request(started.port, "/proxies", "127.0.0.1", "",
+      "OPTIONS",
+      "Access-Control-Request-Method: PUT\r\n"
+      "Access-Control-Request-Headers: authorization\r\n");
+  EXPECT_NE(StatusLine(answer).find("204"), std::string::npos) << answer;
+  EXPECT_NE(answer.find("Access-Control-Allow-Origin: *"), std::string::npos)
+      << answer;
+  EXPECT_NE(answer.find("Authorization"), std::string::npos) << answer;
+}
+
+// Chrome asks before letting a page on a public origin reach a private
+// address. Saying yes is sound only while the token is what decides.
+TEST(StatusServerTest, AnswersPrivateNetworkPreflightOnlyWithASecret) {
+  const std::string preflight =
+      "Access-Control-Request-Method: GET\r\n"
+      "Access-Control-Request-Private-Network: true\r\n";
+
+  auto guarded = Start("127.0.0.1", "s3cret");
+  ASSERT_NE(guarded.server, nullptr);
+  const auto allowed = Request(
+      guarded.port, "/proxies", "127.0.0.1", "", "OPTIONS", preflight);
+  EXPECT_NE(allowed.find("Access-Control-Allow-Private-Network: true"),
+      std::string::npos)
+      << allowed;
+  guarded.server->Stop();
+
+  auto open = Start("127.0.0.1", "");
+  ASSERT_NE(open.server, nullptr);
+  const auto refused =
+      Request(open.port, "/proxies", "127.0.0.1", "", "OPTIONS", preflight);
+  EXPECT_EQ(refused.find("Access-Control-Allow-Private-Network"),
+      std::string::npos)
+      << refused;
 }
