@@ -2,7 +2,11 @@
 
 [ -n "$IPKG_INSTROOT" ] && exit 0
 
-/etc/init.d/fptn stop
-/etc/init.d/fptn disable
+# The service is normally not running here: ZeroBlock keeps its own helper and
+# forces fptn.config.enabled to 0. procd then answers the stop with
+# "Command failed: ubus call service delete ... (Not found)", which every
+# auto-install upgrade would print as if something went wrong.
+/etc/init.d/fptn stop >/dev/null 2>&1
+/etc/init.d/fptn disable >/dev/null 2>&1
 
 exit 0
