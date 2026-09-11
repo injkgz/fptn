@@ -738,14 +738,14 @@ return view.extend({
 
 		o = s.taboption('general', form.Value, 'status_listen',
 			'Status API address',
-			'Serve a local HTTP API with the server pool and their latency, for example 127.0.0.1:9091. Keep it on the loopback: on 0.0.0.0 the server list is readable from the whole network.');
+			'Serve an HTTP API with the server pool and their latency, for example 127.0.0.1:9091. Anything but the loopback needs a token below - the client refuses to start otherwise, because the pool, the latency probe and the server switch would be open to the whole network.');
 		o.datatype = 'ipaddrport';
 		o.placeholder = '127.0.0.1:9091';
 		o.rmempty = true;
 
 		o = s.taboption('general', form.Value, 'status_secret',
 			'Status API token',
-			'Requests must carry Authorization: Bearer <token>. Empty means no check.');
+			'Requests must carry Authorization: Bearer <token>. Empty means no check, and then the address above may only be the loopback. Required to reach the API from another host.');
 		o.password = true;
 		o.depends({ status_listen: /.+/ });
 		o.rmempty = true;

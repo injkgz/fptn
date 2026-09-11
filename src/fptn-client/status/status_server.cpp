@@ -141,6 +141,16 @@ bool StatusServer::Start() {
   try {
     const auto address =
         boost::asio::ip::make_address(options_.listen_address);
+    // Off the loopback the pool, the delay probe and the switch endpoint are
+    // on the network, and the secret is the only thing in front of them.
+    // Coming up wide open there would be worse than not coming up at all.
+    if (!address.is_loopback() && options_.secret.empty()) {
+      SPDLOG_ERROR(
+          "Status API: refusing to listen on {} without --status-secret - "
+          "an endpoint off the loopback has nothing else guarding it",
+          options_.listen_address);
+      return false;
+    }
     const tcp::endpoint endpoint{address, options_.listen_port};
 
     acceptor_ = std::make_unique<tcp::acceptor>(ioc_);
@@ -238,6 +248,16 @@ boost::asio::awaitable<void> StatusServer::AcceptLoop() {
 bool StatusServer::HostAllowed(const std::string& host) const {
   if (host.empty()) {
     return true;  // HTTP/1.0 clients may omit it
+  }
+  // The check is there to stop a page whose domain resolves to the loopback
+  // from reaching an endpoint that asks for nothing. Once a secret is set it
+  // buys no safety - the request still has to carry the token, and no CORS
+  // header goes back, so a browser cannot read the answer either way - while
+  // it does break the case it was never meant to cover: an endpoint bound to
+  // a LAN address, or to the wildcard, reached by whatever name the caller
+  // happened to use.
+  if (!options_.secret.empty()) {
+    return true;
   }
   return HostMatches(host, "127.0.0.1") || HostMatches(host, "localhost") ||
          HostMatches(host, "[::1]") ||

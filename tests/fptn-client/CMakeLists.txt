@@ -36,7 +36,7 @@ add_executable(Socks5ServerTest
   "${FPTN_CLIENT_DIR}/socks/socks5_server.cpp"
   "${FPTN_CLIENT_DIR}/socks/udp_associate.cpp")
 target_include_directories(Socks5ServerTest PRIVATE "${FPTN_CLIENT_DIR}")
-# PolicyRoute ходит в системные команды, отсюда Boost::process.
+# PolicyRoute shells out to system commands, hence Boost::process.
 target_link_libraries(Socks5ServerTest PRIVATE ${LIBS} Boost::process
                                                Threads::Threads)
 add_test(NAME Socks5ServerTest COMMAND Socks5ServerTest)
@@ -48,6 +48,15 @@ target_include_directories(DomainBlacklistMatchTest PRIVATE "${FPTN_CLIENT_DIR}"
 target_link_libraries(
   DomainBlacklistMatchTest PRIVATE ${LIBS} Boost::locale re2::re2)
 add_test(NAME DomainBlacklistMatchTest COMMAND DomainBlacklistMatchTest)
+
+# --- Status API server test ---
+add_executable(StatusServerTest
+  status/StatusServerTest.cpp
+  "${FPTN_CLIENT_DIR}/status/status_server.cpp"
+  "${FPTN_CLIENT_DIR}/status/server_registry.cpp")
+target_include_directories(StatusServerTest PRIVATE "${FPTN_CLIENT_DIR}")
+target_link_libraries(StatusServerTest PRIVATE ${LIBS} Threads::Threads)
+add_test(NAME StatusServerTest COMMAND StatusServerTest)
 
 # --- Server registry test ---
 add_executable(ServerRegistryTest

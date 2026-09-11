@@ -118,7 +118,7 @@ and dnsmasq are left alone, and the routing table belongs to whoever created it.
 | flag | default | what it does |
 |---|---|---|
 | `--status-listen` | — | Serve a local HTTP API with the server list and their latency, e.g. `127.0.0.1:9091` |
-| `--status-secret` | — | Token: requests must carry `Authorization: Bearer <token>`. Empty means no check |
+| `--status-secret` | — | Token: requests must carry `Authorization: Bearer <token>`. Empty means no check, and then the endpoint may only be bound to the loopback |
 | `--probe-interval` | `0` | Re-measure the whole pool every N seconds. `0` disables it |
 
 The client knows which servers a token carries and how long each takes to
@@ -186,10 +186,35 @@ that exclusion cannot be rewritten in place. An attempt to switch in that mode
 returns `503` and a log line. On a router this costs nothing: the transparent
 proxy owns the routes there and the client runs as its helper.
 
-**Listen on the loopback only.** `--status-listen 0.0.0.0:9091` exposes the
-server list to the whole local network, and a token does not change that. The
-Xray metrics server that LuCI packages read has no authentication at all and is
-bound to `0.0.0.0` — not an example worth following.
+### Reaching the API from another host
+
+The endpoint hands out the server pool, runs a latency probe on demand and
+accepts a switch request, so off the loopback the token is the only thing in
+front of it. Two rules follow from that, and the client enforces the first:
+
+**Off the loopback a secret is required.** `--status-listen 0.0.0.0:9091`
+without `--status-secret` is refused at startup with a log line rather than
+served wide open. sing-box takes the opposite route here — an empty `secret`
+disables its Clash API authentication silently — and the Xray metrics server
+that LuCI packages read has no authentication at all while bound to `0.0.0.0`.
+Neither is an example worth following.
+
+**With a secret set, any `Host` is accepted.** Without one the header is
+checked against the loopback and the bound address, which is what stops a page
+whose domain resolves to `127.0.0.1` from reaching an endpoint that asks for
+nothing. Once a token is required that check buys nothing — the request still
+has to carry it, and no `Access-Control-Allow-Origin` is sent back, so a
+browser cannot read the answer either way — while it would break the case this
+is for: an endpoint bound to a LAN address or to the wildcard, reached by
+whatever name the caller used.
+
+The token is compared without an early exit, so a wrong guess takes the same
+time whether it differs in the first character or the last.
+
+```sh
+fptn-client-cli --status-listen 0.0.0.0:9091 --status-secret "$TOKEN" ...
+curl -H "Authorization: Bearer $TOKEN" http://192.168.1.1:9091/proxies
+```
 
 ## Network and tunnel
 
