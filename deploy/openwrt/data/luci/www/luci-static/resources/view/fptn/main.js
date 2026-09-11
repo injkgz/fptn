@@ -12,6 +12,8 @@ var packageVersion = '@FPTN_VERSION@';
 var botLink = '<a href="https://t.me/fptn_bot" target="_blank" ' +
 	'rel="noreferrer">@fptn_bot</a>';
 
+var brotliDecode;
+
 var spoofingMethods = [
 	[ 'sni-spoofing-chrome-149', 'Chrome 149' ],
 	[ 'sni-spoofing-chrome-148', 'Chrome 148' ],
@@ -54,6 +56,77 @@ function isRunning() {
 	return serviceInfo().then(function (info) {
 		return info.running;
 	});
+}
+
+function parseToken(token) {
+	try {
+		var text = token.replace(/[\s=]/g, '');
+		var brotli = /^fptnb(:|\/\/)/.test(text);
+		var body = text.replace(brotli ? /^fptnb(:|\/\/)/ : /^fptn:(\/\/)?/, '');
+		var bytes = Uint8Array.from(atob(body), function (c) {
+			return c.charCodeAt(0);
+		});
+		var config = JSON.parse(new TextDecoder().decode(
+			brotli ? brotliDecode(new Int8Array(bytes.buffer)) : bytes));
+
+		var valid = typeof config.version === 'number' &&
+			typeof config.service_name === 'string' &&
+			typeof config.username === 'string' &&
+			typeof config.password === 'string' &&
+			Array.isArray(config.servers) && config.servers.length > 0 &&
+			config.servers.every(function (server) {
+				return typeof server.name === 'string' &&
+					typeof server.host === 'string' &&
+					typeof server.port === 'number' &&
+					typeof server.md5_fingerprint === 'string';
+			});
+
+		return valid ? config : null;
+	} catch (e) {
+		return null;
+	}
+}
+
+function tokenServers(token) {
+	var config = parseToken(token);
+
+	return config ? config.servers.map(function (server) {
+		return server.name;
+	}) : null;
+}
+
+// Имена серверов по всем ключам в поле. null, если хотя бы один не разбирается.
+// Имя, встречающееся в нескольких сервисах, уточняется сервисом - ровно так его
+// понимает --preferred-server.
+function tokenServerNames(value) {
+	var tokens = String(value || '').split(/\s+/)
+		.map(function (item) { return item.trim(); })
+		.filter(function (item) { return item.length > 0; });
+	var seen = {};
+	var entries = [];
+
+	for (var i = 0; i < tokens.length; i++) {
+		var config = parseToken(tokens[i]);
+
+		if (!config)
+			return null;
+
+		config.servers.forEach(function (server) {
+			entries.push({ service: config.service_name, name: server.name });
+			seen[server.name] = (seen[server.name] || 0) + 1;
+		});
+	}
+
+	var names = [];
+	entries.forEach(function (entry) {
+		var name = seen[entry.name] > 1
+			? entry.service + '/' + entry.name : entry.name;
+
+		if (names.indexOf(name) < 0)
+			names.push(name);
+	});
+
+	return names;
 }
 
 function tunnelStats(name) {
@@ -111,19 +184,6 @@ function logTail(log) {
 	return log.split('\n').filter(function (line) {
 		return line.indexOf("Can't to read from device") < 0;
 	}).slice(-400).join('\n');
-}
-
-function restarts(log) {
-	var starts = log.split('\n').filter(function (line) {
-		return line.indexOf('Application started successfully') >= 0;
-	});
-
-	if (!starts.length)
-		return '—';
-
-	var since = starts[0].match(/\d+:\d+:\d+/);
-
-	return (starts.length - 1) + (since ? ' since ' + since[0] : '');
 }
 
 function listOption(section, tab, name, key, title, description, placeholder) {
@@ -204,8 +264,6 @@ function accessTokens() {
 function diagnose() {
 	var tun = uci.get('fptn', 'config', 'tun_interface_name') || 'tun0';
 
-	uci.unload('dhcp');
-
 	return Promise.all([
 		isRunning(),
 		fs.exec('/sbin/ip', [ '-o', 'link', 'show' ]).catch(function () {
@@ -219,7 +277,6 @@ function diagnose() {
 		}),
 		readLog(),
 		uci.load('firewall').catch(function () {}),
-		uci.load('dhcp').catch(function () {}),
 		fs.exec('/bin/ping', [ '-c', '1', '-W', '3', '8.8.8.8' ]).catch(function () {
 			return { code: 1 };
 		}),
@@ -246,10 +303,6 @@ function diagnose() {
 			return zone.name === 'fptn';
 		});
 
-		var dnsmasq = uci.sections('dhcp', 'dnsmasq')[0];
-		var upstream = dnsmasq ? uci.get('dhcp', dnsmasq['.name'], 'server') : null;
-		var noresolv = dnsmasq ? uci.get('dhcp', dnsmasq['.name'], 'noresolv') : null;
-
 		var expected = [ 'NTP server', 'is not reachable', 'stream truncated',
 			'unknown key' ];
 
@@ -262,94 +315,67 @@ function diagnose() {
 
 		var mtu = linkLine.match(/mtu (\d+)/);
 
-		var pinged = r[7] && r[7].code === 0;
-		var stats = r[8] || {};
-		var bypass = routes.split('\n').filter(function (line) {
-			return line.indexOf('via ') >= 0 && line.indexOf('dev ' + tun) < 0;
-		}).length;
+		var pinged = r[6] && r[6].code === 0;
+		var stats = r[7] || {};
 
 		return [
 			{
 				ok: accessTokens().length > 0,
-				title: 'Access token is set',
+				title: _('Access token is set'),
 				detail: accessTokens().length > 0
-					? (accessTokens().length === 1 ? 'configured'
-						: accessTokens().length + ' keys configured')
-					: 'empty, the client refuses to start'
+					? (accessTokens().length === 1 ? _('configured')
+						: _('%d keys configured').format(accessTokens().length))
+					: _('empty, the client refuses to start')
 			},
 			{
 				ok: uci.get('fptn', 'config', 'enabled') === '1',
-				title: 'Client is enabled',
+				title: _('Client is enabled'),
 				detail: uci.get('fptn', 'config', 'enabled') === '1'
-					? 'enabled' : 'disabled in configuration'
+					? _('enabled') : _('disabled in configuration')
 			},
 			{
 				ok: r[0],
-				title: 'VPN process is running',
-				detail: r[0] ? 'running' : 'stopped'
+				title: _('VPN process is running'),
+				detail: r[0] ? _('running') : _('stopped')
 			},
 			{
 				ok: linkLine.indexOf(',UP') >= 0,
-				title: 'Tunnel \'' + tun + '\' is up',
+				title: _('Tunnel \'%s\' is up').format(tun),
 				detail: linkLine
-					? 'up, MTU ' + (mtu ? mtu[1] : 'unknown')
-					: 'interface does not exist'
+					? _('up, MTU %s').format(mtu ? mtu[1] : _('unknown'))
+					: _('interface does not exist')
 			},
 			{
 				ok: addrLine !== '',
-				title: 'Tunnel has an IPv4 address',
+				title: _('Tunnel has an IPv4 address'),
 				detail: addrLine
-					? (addrLine.match(/inet ([0-9./]+)/) || [ '', 'unknown' ])[1]
-					: 'no address assigned'
+					? (addrLine.match(/inet ([0-9./]+)/) || [ '', _('unknown') ])[1]
+					: _('no address assigned')
 			},
 			{
 				ok: defaultLine.indexOf('dev ' + tun) >= 0,
-				title: 'Default route goes through the tunnel',
-				detail: defaultLine || 'no default route at all'
+				title: _('Default route goes through the tunnel'),
+				detail: defaultLine || _('no default route at all')
 			},
 			{
 				ok: zones.length > 0,
-				title: 'Firewall zone \'fptn\' exists',
+				title: _('Firewall zone \'fptn\' exists'),
 				detail: zones.length
-					? 'present, LAN clients are masqueraded'
-					: 'missing, LAN clients will not reach the internet'
-			},
-			{
-				ok: uci.get('fptn', 'config', 'use_fptn_dns') !== '1' ||
-					(noresolv === '1' && upstream != null),
-				title: 'dnsmasq forwards DNS into the tunnel',
-				detail: uci.get('fptn', 'config', 'use_fptn_dns') !== '1'
-					? 'turned off in settings, router DNS is left untouched'
-					: (upstream
-						? 'upstream ' + [].concat(upstream).join(', ') +
-							(noresolv === '1' ? '' : ', but noresolv is off')
-						: 'not configured, DNS queries bypass the VPN')
+					? _('present, LAN clients are masqueraded')
+					: _('missing, LAN clients will not reach the internet')
 			},
 			{
 				ok: pinged,
-				title: 'The internet answers through the tunnel',
+				title: _('The internet answers through the tunnel'),
 				detail: pinged
-					? '8.8.8.8 replies'
-					: '8.8.8.8 does not reply, traffic does not pass the tunnel'
+					? _('8.8.8.8 replies')
+					: _('8.8.8.8 does not reply, traffic does not pass the tunnel')
 			},
 			{
 				ok: parseInt(stats.rx, 10) > 0,
-				title: 'The tunnel carries traffic in both directions',
-				detail: 'sent ' + formatBytes(stats.tx) +
-					', received ' + formatBytes(stats.rx)
-			},
-			{
-				ok: bypass < 100,
-				title: 'Split tunneling keeps a sane number of bypass routes',
-				detail: bypass + ' addresses go around the tunnel' +
-					(bypass < 100 ? '' : ', too many, check the domain lists')
-			},
-			{
-				ok: errors.length === 0,
-				title: 'No unexpected errors since the client started',
-				detail: errors.length
-					? errors.length + ' error line(s), see the Log section'
-					: 'clean, apart from the usual server probe failures'
+				title: _('The tunnel carries traffic in both directions'),
+				detail: _('sent %s, received %s').format(formatBytes(stats.tx),
+					formatBytes(stats.rx))
 			}
 		];
 	});
@@ -372,27 +398,26 @@ function showDiagnostics() {
 
 		var pending = ui.changes.numChanges > 0
 			? E('div', { 'style': 'padding:.5em;color:#a08000' },
-				'There are unsaved changes. The checks below look at the applied ' +
-				'configuration — press "Save & Apply" first.')
+				_('There are unsaved changes. The checks below look at the applied ' +
+				'configuration — press "Save & Apply" first.'))
 			: '';
 
-		ui.showModal('Diagnostics', [
+		ui.showModal(_('Diagnostics'), [
 			E('div', {
 				'style': 'padding:.5em;font-weight:bold;color:' +
 					(failed.length ? '#a00000' : '#00a000')
 			}, failed.length
-				? failed.length + ' check(s) failed'
-				: 'Everything looks fine'),
+				? _('%d check(s) failed').format(failed.length)
+				: _('Everything looks fine')),
 			pending,
 			E('div', {}, rows),
 			E('div', { 'class': 'right' }, E('button', {
 				'class': 'cbi-button',
 				'click': ui.hideModal
-			}, 'Close'))
+			}, _('Close')))
 		]);
 	});
 }
-
 
 function splitRuns(log) {
 	var runs = [], current = '';
@@ -438,44 +463,47 @@ function lastRunHas(log, needles) {
 
 function problemNote(log, connected) {
 	if (accessTokens().length === 0)
-		return 'no token configured';
+		return _('no token configured');
 
 	if (connected)
 		return '';
 
 	if (lastRunHas(log, [ 'no default route', 'default gateway not found',
 			'Unable to find the default gateway' ]))
-		return 'the router has no default route — check the WAN connection';
+		return _('the router has no default route — check the WAN connection');
 
 	if (failedRuns(log, [ 'Config error' ]) >= 3)
-		return 'this access token cannot be read — copy it again from ' + botLink;
+		return _('this access token cannot be read — copy it again from %s').format(botLink);
 
 	if (failedRuns(log, [ 'Status: 401', 'Login failed (code 401)' ]) >= 3)
-		return 'the servers reject this access token — it has expired or is ' +
-			'invalid, get a fresh one from ' + botLink;
+		return _('the servers reject this access token — it has expired or is ' +
+			'invalid, get a fresh one from %s').format(botLink);
 
 	if (failedRuns(log, [ 'DNS resolve error', 'DNS server error' ]) >= 3)
-		return 'the router cannot resolve server names — check its own DNS ' +
-			'settings under Network → DNS';
+		return _('the router cannot resolve server names — check its own DNS ' +
+			'settings under Network → DNS');
 
 	if (failedRuns(log, [ 'does not exist! Check your token' ]) >= 3)
-		return 'the server named in "Preferred server" is not in this token — ' +
-			'clear the field or choose another one';
+		return _('the server named in "Preferred server" is not in this token — ' +
+			'clear the field or choose another one');
 
 	if (failedRuns(log, [ 'All servers unavailable' ]) >= 5)
-		return 'no server could be reached — try another bypass blocking ' +
-			'method, or get a fresh token from ' + botLink;
+		return _('no server could be reached — try another bypass blocking ' +
+			'method, or get a fresh token from %s').format(botLink);
 
 	return '';
 }
 
 function describe(running, tunnel) {
+	if (uci.get('fptn', 'config', 'enabled') !== '1' ||
+			!uci.get('fptn', 'config', 'access_token'))
+		return [ _('Disabled'), '#808080' ];
 	if (!running)
-		return [ 'Stopped', '#a00000' ];
+		return [ _('Starting…'), '#a08000' ];
 	if (!tunnel)
-		return [ 'Connecting…', '#a08000' ];
+		return [ _('Connecting…'), '#a08000' ];
 
-	return [ 'Connected', '#00a000' ];
+	return [ _('Connected'), '#00a000' ];
 }
 
 function collect() {
@@ -489,31 +517,26 @@ function collect() {
 function statusRows(data) {
 	var state = describe(data[0].running, data[1]);
 	var stats = data[3] || {};
-	var log = data[2] || '';
-
-	var lastEvent = log.split('\n').filter(function (line) {
-		return line.trim() !== '';
-	}).pop() || '';
+	var method = uci.get('fptn', 'config', 'bypass_method');
+	var spoofing = spoofingMethods.filter(function (item) {
+		return item[0] === method;
+	})[0];
 
 	return [
-		[ 'Connection', state[0], state[1] ],
-		[ 'Autostart on boot',
-			uci.get('fptn', 'config', 'enabled') === '1' ? 'on' : 'off' ],
-		[ 'Selected server',
-			uci.get('fptn', 'config', 'preferred_server') || 'Auto' ],
-		[ 'Bypass blocking method',
-			uci.get('fptn', 'config', 'bypass_method') || 'obfuscation' ],
-		[ 'Split tunneling',
-			uci.get('fptn', 'config', 'enable_split_tunnel') === '1'
-				? uci.get('fptn', 'config', 'split_tunnel_mode') || 'exclude'
-				: 'off' ],
-		[ 'Tunnel interface',
+		[ _('Connection'), state[0], state[1] ],
+		[ _('Selected server'),
+			uci.get('fptn', 'config', 'preferred_server') || _('Auto') ],
+		[ _('Bypass blocking method'),
+			spoofing ? spoofing[1] : _('Traffic masking (obfuscation)') ],
+		[ _('Split tunneling'),
+			uci.get('fptn', 'config', 'enable_split_tunnel') !== '1' ? _('off')
+				: uci.get('fptn', 'config', 'split_tunnel_mode') === 'include'
+					? _('Include') : _('Exclude') ],
+		[ _('Tunnel interface'),
 			uci.get('fptn', 'config', 'tun_interface_name') || 'tun0' ],
-		[ 'PID', data[0].pid ? String(data[0].pid) : '—' ],
-		[ 'Received', formatBytes(stats.rx) ],
-		[ 'Sent', formatBytes(stats.tx) ],
-		[ 'Client restarts', restarts(log) ],
-		[ 'Last event', lastEvent.replace(/^.*?\]\s*/, '') || '—' ]
+		[ _('PID'), data[0].pid ? String(data[0].pid) : '—' ],
+		[ _('Received'), formatBytes(stats.rx) ],
+		[ _('Sent'), formatBytes(stats.tx) ]
 	];
 }
 
@@ -543,7 +566,7 @@ function refresh() {
 
 		var log = document.getElementById('fptn_log');
 		if (log)
-			log.textContent = logTail(data[2] || '') || 'No messages yet';
+			log.textContent = logTail(data[2] || '') || _('No messages yet');
 
 		return data;
 	});
@@ -561,7 +584,8 @@ return view.extend({
 			var tun = uci.get('fptn', 'config', 'tun_interface_name') || 'tun0';
 
 			return Promise.all([
-				serviceInfo(), hasTunnel(), readLog(), tunnelStats(tun)
+				serviceInfo(), hasTunnel(), readLog(), tunnelStats(tun),
+				import(L.resource('fptn/brotli.js'))
 			]);
 		});
 	},
@@ -571,32 +595,34 @@ return view.extend({
 		var running = data[0].running;
 		var state = describe(running, data[1]);
 
+		brotliDecode = data[4].BrotliDecode;
+
 		// Opening a page must not touch the daemon: procd already restarts it
 		// on a config change through its reload trigger. This used to restart
 		// or stop the tunnel just because someone looked at the tab.
 		poll.add(refresh, 5);
 
-		m = new form.Map('fptn', 'FPTN VPN', 'Censorship-resistant VPN');
+		m = new form.Map('fptn', 'FPTN VPN', _('Censorship-resistant VPN'));
 
-		s = m.section(form.NamedSection, 'config', 'fptn', 'Getting started');
+		s = m.section(form.NamedSection, 'config', 'fptn', _('Getting started'));
 		s.anonymous = true;
 
 		o = s.option(form.DummyValue, '_help');
 		o.rawhtml = true;
 		o.cfgvalue = function () {
 			return '<ol style="margin:0;padding-inline-start:1.5em">' +
-				'<li>Open ' + botLink + ' in Telegram and copy the access token.</li>' +
-				'<li>Paste it into the "Access token" field below and press "Save &amp; Apply".</li>' +
-				'<li>Got keys from several services? Put each on its own line.</li>' +
+				'<li>' + _('Open %s in Telegram and copy the access token.').format(botLink) + '</li>' +
+				'<li>' + _('Paste it into the "Access token" field below and press "Save & Apply".') + '</li>' +
+				'<li>' + _('Got keys from several services? Put each on its own line.') + '</li>' +
 				'</ol>';
 		};
 
-		o = s.option(form.Flag, 'enabled', 'Enabled');
+		o = s.option(form.Flag, 'enabled', _('Enabled'));
 		o.rmempty = false;
 
 		var enabledOption = o;
 
-		o = s.option(form.DummyValue, '_status', 'Service');
+		o = s.option(form.DummyValue, '_status', _('Service'));
 		o.rawhtml = true;
 		o.cfgvalue = function () {
 			return '<span id="fptn_status" style="font-weight:bold;color:' +
@@ -605,7 +631,7 @@ return view.extend({
 				problemNote(data[2] || '', data[1]) + '</span>';
 		};
 
-		o = s.option(form.DummyValue, '_update', 'Version');
+		o = s.option(form.DummyValue, '_update', _('Version'));
 		o.renderWidget = function () {
 			var node = E('span', {}, packageVersion);
 
@@ -617,14 +643,14 @@ return view.extend({
 					'href': 'https://github.com/fptn-project/fptn/releases/latest',
 					'target': '_blank',
 					'rel': 'noreferrer'
-				}, 'version ' + latest + ' is available') ]));
+				}, _('version %s is available').format(latest)) ]));
 			});
 
 			return node;
 		};
 
 		o = s.option(form.Button, '_diagnostics');
-		o.inputtitle = 'Diagnostics';
+		o.inputtitle = _('Diagnostics');
 		o.inputstyle = 'apply';
 		o.onclick = function () {
 			return showDiagnostics();
@@ -632,9 +658,9 @@ return view.extend({
 
 		s = m.section(form.NamedSection, 'config', 'fptn');
 		s.anonymous = true;
-		s.tab('status', 'Status');
-		s.tab('general', 'Settings');
-		s.tab('routing', 'Routing');
+		s.tab('status', _('Status'));
+		s.tab('general', _('Settings'));
+		s.tab('routing', _('Routing'));
 
 		statusRows(data).forEach(function (row, index) {
 			var field = s.taboption('status', form.DummyValue, '_st' + index, row[0]);
@@ -646,11 +672,12 @@ return view.extend({
 			};
 		});
 
-		o = s.taboption('general', form.TextValue, 'access_token', 'Access tokens',
-			'Token issued by ' + botLink + ' in Telegram. It carries the server ' +
-			'list, so get a new one when the current token expires. ' +
-			'One key per line - the servers of every key are tried together, ' +
-			'and the client connects to whichever answers first.');
+		o = s.taboption('general', form.TextValue, 'access_token',
+			_('Access tokens'),
+			_('Token issued by %s in Telegram. It carries the server list, so ' +
+			'get a new one when the current token expires. One key per line - ' +
+			'the servers of every key are tried together, and the client ' +
+			'connects to whichever answers first.').format(botLink));
 		o.rows = 6;
 		o.rmempty = false;
 		o.cfgvalue = function () {
@@ -665,14 +692,40 @@ return view.extend({
 			uci.set('fptn', section_id, 'access_token',
 				list.length === 1 ? list[0] : list);
 		};
+		o.validate = function (section_id, value) {
+			if (!value || tokenServerNames(value))
+				return true;
 
-		o = s.taboption('general', form.Value, 'preferred_server', 'Preferred server',
-			'Name of the server to connect to, as listed by the Telegram bot. ' +
-			'Leave empty and the client logs in to every server at once and ' +
-			'keeps the one that answers first. With several keys a name that ' +
-			'appears in more than one of them can be qualified with its ' +
-			'service: "MyService/Server-1".');
+			return _('A token is damaged or not copied completely — copy it ' +
+				'again from @fptn_bot');
+		};
+		o.onchange = function (ev, section_id, value) {
+			var names = tokenServerNames(value);
+			var widget = serverOption.getUIElement(section_id);
+
+			if (!names || !widget)
+				return;
+
+			var selected = widget.getValue();
+			widget.clearChoices(true);
+			widget.addChoices([ '' ].concat(names), { '': _('Auto') });
+			widget.setValue(names.indexOf(selected) >= 0 ? selected : '');
+		};
+
+		o = s.taboption('general', form.Value, 'preferred_server',
+			_('Preferred server'),
+			_('Server from the access tokens to connect to. "Auto" logs in to ' +
+			'every server at once and keeps the one that answers first. A name ' +
+			'that appears in more than one key is offered qualified with its ' +
+			'service: "MyService/Server-1".'));
 		o.rmempty = true;
+		o.value('', _('Auto'));
+		(tokenServerNames(accessTokens().join('\n')) || []).forEach(
+			function (name) {
+				o.value(name);
+			});
+
+		var serverOption = o;
 
 		o = s.taboption('general', form.Value, 'exclude_servers',
 			'Exclude servers',
@@ -682,135 +735,145 @@ return view.extend({
 		o.rmempty = true;
 		o.placeholder = 'Russia|Vietnam';
 
-		o = s.taboption('general', form.Value, 'max_ping', 'Latency limit, ms',
-			'A server slower than this is not picked, and the one in use is ' +
-			'replaced once it stays over the limit. Empty or 0 - no limit.');
+		o = s.taboption('general', form.Value, 'max_ping',
+			_('Latency limit, ms'),
+			_('A server slower than this is not picked, and the one in use is ' +
+			'replaced once it stays over the limit. Empty or 0 - no limit.'));
 		o.rmempty = true;
 		o.datatype = 'uinteger';
 		o.placeholder = '0';
 
 		o = s.taboption('general', form.ListValue, 'connection_strategy',
-			'Connection strategy',
-			'How many tunnels are kept open at the same time. Every tunnel is ' +
+			_('Connection strategy'),
+			_('How many tunnels are kept open at the same time. Every tunnel is ' +
 			'replaced by a new one each 10 minutes, and traffic is spread ' +
-			'across them, so no single connection carries the whole session.');
-		o.value('rolling-tunnel', 'Rolling tunnel');
-		o.value('dual-rolling-tunnel', 'Dual rolling tunnel');
-		o.value('triple-rolling-tunnel', 'Triple rolling tunnel');
+			'across them, so no single connection carries the whole session.'));
+		o.value('rolling-tunnel', _('Rolling tunnel'));
+		o.value('dual-rolling-tunnel', _('Dual rolling tunnel'));
+		o.value('triple-rolling-tunnel', _('Triple rolling tunnel'));
 		o.default = 'dual-rolling-tunnel';
 
 		o = s.taboption('general', form.ListValue, 'bypass_method',
-			'Bypass blocking method',
-			'How the connection is disguised. Traffic masking hides it inside ' +
+			_('Bypass blocking method'),
+			_('How the connection is disguised. Traffic masking hides it inside ' +
 			'an ordinary TLS stream; the browser options copy the TLS handshake ' +
 			'of that browser, so the connection looks like a visit to the ' +
-			'domain set below.');
-		o.value('obfuscation', 'Traffic masking (obfuscation)');
+			'domain set below.'));
+		o.value('obfuscation', _('Traffic masking (obfuscation)'));
 		spoofingMethods.forEach(function (method) {
 			o.value(method[0], method[1]);
 		});
 		o.default = 'obfuscation';
 
-		o = s.taboption('general', form.Value, 'mtu_size', 'Tunnel MTU',
-			'Largest packet the tunnel carries. 1420 fits almost every ' +
+		o = s.taboption('general', form.Value, 'mtu_size', _('Tunnel MTU'),
+			_('Largest packet the tunnel carries. 1420 fits almost every ' +
 			'provider; lower it if big packets get stuck while small ones ' +
-			'pass. Allowed range is 576 to 65535.');
+			'pass. Allowed range is 576 to 65535.'));
 		o.datatype = 'range(576, 65535)';
 		o.placeholder = '1420';
 		o.rmempty = true;
 
-		o = s.taboption('general', form.Value, 'sni', 'Fake domain to bypass blocking',
-			'Domain name sent in the TLS handshake instead of the real server ' +
+		o = s.taboption('general', form.Value, 'sni', _('Fake domain to bypass blocking'),
+			_('Domain name sent in the TLS handshake instead of the real server ' +
 			'address. Empty means rutube.ru. Pick a popular site that is not ' +
-			'blocked where you are.');
+			'blocked where you are.'));
 		spoofingMethods.forEach(function (method) {
 			o.depends('bypass_method', method[0]);
 		});
 		o.rmempty = true;
 
 		o = s.taboption('routing', form.Value, 'socks_max_sessions',
-			'SOCKS session limit',
-			'Cap on simultaneous SOCKS sessions. Empty derives it from the file descriptor limit: two per session plus headroom.');
+			_('SOCKS session limit'),
+			_('Cap on simultaneous SOCKS sessions. Empty derives it from the ' +
+			'file descriptor limit: two per session plus headroom.'));
 		o.datatype = 'uinteger';
 		o.placeholder = 'auto';
 		o.depends({ socks_listen: /.+/ });
 		o.rmempty = true;
 
 		o = s.taboption('general', form.Value, 'status_listen',
-			'Status API address',
-			'Serve an HTTP API with the server pool and their latency, for example 127.0.0.1:9091. Anything but the loopback needs a token below - the client refuses to start otherwise, because the pool, the latency probe and the server switch would be open to the whole network.');
+			_('Status API address'),
+			_('Serve an HTTP API with the server pool and their latency, for ' +
+			'example 127.0.0.1:9091. Anything but the loopback needs a token ' +
+			'below - the client refuses to start otherwise, because the pool, ' +
+			'the latency probe and the server switch would be open to the ' +
+			'whole network.'));
 		o.datatype = 'ipaddrport';
 		o.placeholder = '127.0.0.1:9091';
 		o.rmempty = true;
 
 		o = s.taboption('general', form.Value, 'status_secret',
-			'Status API token',
-			'Requests must carry Authorization: Bearer <token>. Empty means no check, and then the address above may only be the loopback. Required to reach the API from another host.');
+			_('Status API token'),
+			_('Requests must carry Authorization: Bearer <token>. Empty means ' +
+			'no check, and then the address above may only be the loopback. ' +
+			'Required to reach the API from another host.'));
 		o.password = true;
 		o.depends({ status_listen: /.+/ });
 		o.rmempty = true;
 
 		o = s.taboption('general', form.Value, 'probe_interval',
-			'Re-measure interval',
-			'Re-measure every server in the pool every N seconds. 0 keeps only the reading taken at startup, so a server that was down at launch stays marked dead.');
+			_('Re-measure interval'),
+			_('Re-measure every server in the pool every N seconds. 0 keeps ' +
+			'only the reading taken at startup, so a server that was down at ' +
+			'launch stays marked dead.'));
 		o.datatype = 'uinteger';
 		o.placeholder = '0';
 		o.depends({ status_listen: /.+/ });
 		o.rmempty = true;
 
-		o = s.taboption('routing', form.Flag, 'use_fptn_dns', 'Use FPTN DNS',
-			'Send DNS queries through the tunnel. When off, FPTN does not touch the router DNS settings at all.');
+		o = s.taboption('routing', form.Flag, 'use_fptn_dns', _('Use FPTN DNS'),
+			_('Send DNS queries through the tunnel. When off, FPTN does not touch the router DNS settings at all.'));
 		o.default = '1';
 		o.rmempty = false;
 
 		o = s.taboption('routing', form.Flag, 'enable_split_tunnel',
-			'Enable split tunneling',
-			'When enabled, you can configure which sites use VPN and which go directly.');
+			_('Enable split tunneling'),
+			_('When enabled, you can configure which sites use VPN and which go directly.'));
 		o.default = '1';
 		o.rmempty = false;
 
 		o = s.taboption('routing', form.ListValue, 'split_tunnel_mode',
-			'Split tunnel mode',
-			'Defines traffic routing strategy for split tunneling.');
-		o.value('exclude', 'Exclude');
-		o.value('include', 'Include');
+			_('Split tunnel mode'),
+			_('Defines traffic routing strategy for split tunneling.'));
+		o.value('exclude', _('Exclude'));
+		o.value('include', _('Include'));
 		o.default = 'exclude';
 		o.depends('enable_split_tunnel', '1');
 
 		o = listOption(s, 'routing', 'split_tunnel_domains_exclude',
-			'split_tunnel_domains', 'Domains to bypass VPN',
-			'List domains that should bypass VPN tunnel. These domains will go directly, all other traffic uses VPN',
+			'split_tunnel_domains', _('Domains to bypass VPN'),
+			_('List domains that should bypass VPN tunnel. These domains will go directly, all other traffic uses VPN'),
 			'example.com');
 		o.depends({ enable_split_tunnel: '1', split_tunnel_mode: 'exclude' });
 
 		o = listOption(s, 'routing', 'split_tunnel_domains_include',
-			'split_tunnel_domains', 'Domains to route through VPN',
-			'List domains that should use VPN tunnel. Only these domains will go through VPN, all other traffic bypasses VPN',
+			'split_tunnel_domains', _('Domains to route through VPN'),
+			_('List domains that should use VPN tunnel. Only these domains will go through VPN, all other traffic bypasses VPN'),
 			'example.com');
 		o.depends({ enable_split_tunnel: '1', split_tunnel_mode: 'include' });
 
 		listOption(s, 'routing', 'blacklist_domains', 'blacklist_domains',
-			'Blacklist domains',
-			'Completely block access to the main domain AND all its subdomains. Format: example.com (one per line)',
+			_('Blacklist domains'),
+			_('Completely block access to the main domain AND all its subdomains. Format: example.com (one per line)'),
 			'example.com');
 
 		listOption(s, 'routing', 'exclude_tunnel_networks', 'exclude_tunnel_networks',
-			'Exclude tunnel networks',
-			'Networks that always bypass VPN tunnel. Traffic to these networks goes directly, never through VPN',
+			_('Exclude tunnel networks'),
+			_('Networks that always bypass VPN tunnel. Traffic to these networks goes directly, never through VPN'),
 			'10.0.0.0/8');
 
 		listOption(s, 'routing', 'include_tunnel_networks', 'include_tunnel_networks',
-			'Include tunnel networks',
-			'Networks that always use VPN tunnel. Traffic to these networks always goes through VPN',
+			_('Include tunnel networks'),
+			_('Networks that always use VPN tunnel. Traffic to these networks always goes through VPN'),
 			'192.168.99.0/24');
 
-		s = m.section(form.NamedSection, 'config', 'fptn', 'Log');
+		s = m.section(form.NamedSection, 'config', 'fptn', _('Log'));
 		s.anonymous = true;
 
 		o = s.option(form.DummyValue, '_log');
 		o.rawhtml = true;
 		o.cfgvalue = function () {
-			var text = logTail(data[2] || '') || 'No messages yet';
+			var text = logTail(data[2] || '') || _('No messages yet');
 			return '<pre id="fptn_log" style="max-height:20em;overflow:auto">' +
 				text.replace(/[&<>]/g, function (c) {
 					return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c];

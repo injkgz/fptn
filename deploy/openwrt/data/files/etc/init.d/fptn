@@ -167,10 +167,6 @@ start_service() {
 	fi
 	[ -n "$gateway" ] && echo "$gateway" > "$GATEWAY_CACHE"
 
-	local tun
-	config_get tun config tun_interface_name tun0
-	ip link del "$tun" 2>/dev/null
-
 	# Named so that `ubus call service list` and LuCI can find it.
 	procd_open_instance fptn
 	procd_set_param command "$PROG"
@@ -244,10 +240,6 @@ start_service() {
 stop_service() {
 	config_load fptn
 	restore_dns
-
-	local tun
-	config_get tun config tun_interface_name tun0
-	ip link del "$tun" 2>/dev/null
 }
 
 # Without this rc.common turns `reload` into `restart`, and every edit in
